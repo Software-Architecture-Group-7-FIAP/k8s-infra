@@ -36,6 +36,18 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
+      - name: Dump OIDC claims used by the trust policy
+        run: |
+          tok="$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r .value)"
+          # JWT payload is base64url (no padding); translate to standard base64 and pad to a
+          # multiple of 4 before decoding. Only these claims are printed, never the token.
+          payload="$(echo "$tok" | cut -d. -f2 | tr '_-' '/+')"
+          pad=$(( (4 - ${#payload} % 4) % 4 ))
+          while [ "$pad" -gt 0 ]; do payload="${payload}="; pad=$((pad - 1)); done
+          echo "$payload" | base64 -d 2>/dev/null \
+            | jq '{sub, repository, repository_owner, environment, event_name, job_workflow_ref, ref}'
+
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
