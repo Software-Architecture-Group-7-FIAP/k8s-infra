@@ -1,0 +1,58 @@
+name: Apply
+
+# Merges to main deploy automatically only while a staging session is open (STAGING_ACTIVE=true).
+# workflow_dispatch opens a session explicitly.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: staging-infra
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: 1.15.8
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  apply:
+    name: apply
+    if: github.event_name == 'workflow_dispatch' || vars.STAGING_ACTIVE == 'true'
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 3600
+
+      - name: Apply foundation (network, EKS, ALB, SSM contract)
+        run: |
+          terraform -chdir=envs/staging/foundation init -input=false
+          terraform -chdir=envs/staging/foundation apply -input=false -auto-approve -lock-timeout=300s > /dev/null
+          echo "foundation applied" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply platform (add-ons, namespaces, policies)
+        run: |
+          terraform -chdir=envs/staging/platform init -input=false
+          terraform -chdir=envs/staging/platform apply -input=false -auto-approve -lock-timeout=300s > /dev/null
+          echo "platform applied" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test
+        run: ./scripts/smoke.sh | tee -a "$GITHUB_STEP_SUMMARY"

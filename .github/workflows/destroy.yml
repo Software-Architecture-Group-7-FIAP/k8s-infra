@@ -1,0 +1,73 @@
+name: Destroy
+
+# Closes a staging session. Also runs nightly as a safety net so nothing stays billing overnight.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to tear down the staging cluster'
+        required: true
+  schedule:
+    - cron: "0 2 * * *" # 23:00 America/Sao_Paulo
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: staging-infra
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: 1.15.8
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  destroy:
+    name: destroy
+    if: github.event_name == 'schedule' || inputs.confirm == 'destroy'
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 3600
+
+      - name: Destroy platform (only while the cluster exists)
+        run: |
+          set +e
+          describe_err="$(aws eks describe-cluster --name auto-shop-staging 2>&1 >/dev/null)"
+          describe_rc=$?
+          set -e
+          if [ "$describe_rc" -eq 0 ]; then
+            terraform -chdir=envs/staging/platform init -input=false
+            terraform -chdir=envs/staging/platform destroy -input=false -auto-approve -lock-timeout=300s > /dev/null
+            echo "platform destroyed" >> "$GITHUB_STEP_SUMMARY"
+          elif echo "$describe_err" | grep -q "ResourceNotFoundException"; then
+            echo "platform: cluster not running, nothing to destroy" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "describe-cluster failed for a reason other than 'cluster does not exist':" >&2
+            echo "$describe_err" >&2
+            exit 1
+          fi
+
+      - name: Destroy foundation
+        run: |
+          terraform -chdir=envs/staging/foundation init -input=false
+          terraform -chdir=envs/staging/foundation destroy -input=false -auto-approve -lock-timeout=300s > /dev/null
+          echo "foundation destroyed" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Orphan check
+        run: ./scripts/orphans.sh | tee -a "$GITHUB_STEP_SUMMARY"
