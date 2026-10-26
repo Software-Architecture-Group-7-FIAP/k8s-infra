@@ -20,6 +20,18 @@ locals {
   }
 }
 
+# Keep the cluster-admin entry stable across plan (gh-plan) and apply (gh-deploy) identities. The
+# EKS module previously keyed the same deploy entry as `cluster_creator`; move state in place.
+moved {
+  from = module.eks.aws_eks_access_entry.this["cluster_creator"]
+  to   = module.eks.aws_eks_access_entry.this["k8s-infra-deploy"]
+}
+
+moved {
+  from = module.eks.aws_eks_access_policy_association.this["cluster_creator_admin"]
+  to   = module.eks.aws_eks_access_policy_association.this["k8s-infra-deploy_admin"]
+}
+
 module "network" {
   source = "../../../modules/network"
 
@@ -73,10 +85,8 @@ module "eks" {
 
   enable_irsa         = true
   authentication_mode = "API"
-  # Cheap insurance for the first session: if EKS access entries ever fail to recognize the
-  # path-qualified CI role ARNs (session ARNs don't carry IAM paths), the principal that ran
-  # `terraform apply` still gets in as a fallback admin.
-  enable_cluster_creator_admin_permissions = true
+  # Keep access entries independent of whether Terraform is running as the plan or deploy role.
+  enable_cluster_creator_admin_permissions = false
 
   access_entries = merge(
     {

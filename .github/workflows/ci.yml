@@ -128,10 +128,18 @@ jobs:
             ./scripts/plan-summary.sh "envs/staging/$stack" >> "$GITHUB_STEP_SUMMARY"
           done
 
-      - name: Plan platform (only while the cluster exists)
+      - name: Plan platform (after foundation contracts are published)
         run: |
-          if aws eks describe-cluster --name auto-shop-staging >/dev/null 2>&1; then
+          required_parameters=(
+            "/auto-shop/staging/eks/cluster-name"
+            "/auto-shop/staging/network/vpc-id"
+            "/auto-shop/staging/network/vpc-cidr"
+            "/auto-shop/staging/network/rds-isolated-subnet-cidrs"
+            "/auto-shop/staging/network/alb-subnet-cidrs"
+          )
+          invalid_parameters="$(aws ssm get-parameters --names "${required_parameters[@]}" --query 'InvalidParameters' --output json)"
+          if [[ "$invalid_parameters" == "[]" ]] && aws eks describe-cluster --name auto-shop-staging >/dev/null 2>&1; then
             ./scripts/plan-summary.sh envs/staging/platform >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "### platform: skipped (cluster not running)" >> "$GITHUB_STEP_SUMMARY"
+            echo "### platform: skipped (foundation or SSM contracts not ready)" >> "$GITHUB_STEP_SUMMARY"
           fi

@@ -135,7 +135,7 @@ Sessão de 5 h ≈ US$ 1,10 só deste repositório. Esquecido ligado: ~US$ 5 por
 
 ## Segurança: controles implementados
 
-- **Permissions boundary** (`auto-shop-boundary`, mesmo formato do `PowerUserAccess`) obrigatória em toda role criada sob `/auto-shop/`. Uma role de deploy não consegue criar outra role, anexar `AdministratorAccess` e assumi-la para escapar do próprio limite: o `iam:CreateRole` só é permitido com a boundary já anexada, e nada tem permissão para removê-la ou trocá-la depois.
+- **Permissions boundary** (`auto-shop-boundary`, mesmo formato do `PowerUserAccess`) obrigatória nas roles criadas pela CI sob `/auto-shop/`. Uma role de deploy não consegue criar outra role, anexar `AdministratorAccess` e assumi-la para escapar do próprio limite: o `iam:CreateRole` só é permitido com a boundary já anexada, e nada tem permissão para removê-la ou trocá-la depois.
 - **`iam:PassRole` condicionado a `iam:PassedToService`**: uma role de deploy só repassa roles do projeto para os serviços AWS que realmente as assumem (EKS, EC2, Lambda, Pod Identity), não para qualquer destino.
 - **Isolamento de state entre repositórios** por `Deny` em `s3:*` (não só pelas três ações de leitura/escrita) nos prefixos dos outros três repositórios, incluindo `GetObjectVersion` num bucket versionado.
 - **OIDC do deploy restrito por Environment + política de branch do GitHub**: a trust policy exige `sub = repo:ORG@*/REPO@*:environment:staging`; a política de deployment-branch do Environment `staging` (restrita a `main`, configurada no GitHub) é o que impede um `workflow_dispatch` de outra branch — o GitHub nem chega a emitir o token nesse caso. Não há condição IAM em `job_workflow_ref`: a validação empírica nesta conta mostrou que o STS não aceita esse claim como condição. O CI verifica diariamente que a política de `staging` continua restrita a `main`.
@@ -151,7 +151,7 @@ Registradas no ADR-0071 e suprimidas em `.checkov.yaml`:
 - **ALB interno em HTTP**: só alcançável dentro da VPC pelo VPC Link; TLS termina no API Gateway.
 - **Sem access logs no ALB** e sem deletion protection (ambiente efêmero).
 - **NetworkPolicy em modo `standard`** com default-deny explícito nos namespaces do projeto; o modo `strict` bloquearia add-ons de `kube-system` sem políticas.
-- **Roles de deploy com `PowerUserAccess`** + boundary e IAM restrito ao path `/auto-shop/`, sem poder alterar as próprias roles nem o state de outros repositórios.
+- **Roles de deploy com `PowerUserAccess`** e política IAM restrita ao path `/auto-shop/`; elas não podem alterar as próprias identidades nem acessar o state de outros repositórios. Roles criadas por elas precisam carregar `auto-shop-boundary`. A boundary não está anexada às roles de deploy porque bloqueia o bucket compartilhado usado pelo Terraform state.
 - **Sem criptografia de Secrets por CMK adicional**: o etcd já é criptografado pela chave padrão gerenciada pela AWS; uma CMK extra ficaria em `PendingDeletion` por 7 dias após cada teardown, com custo residual. Reavaliar num ambiente de vida mais longa.
 - **PR com `terraform plan` usa credenciais reais** (role `gh-plan-*`, `ReadOnlyAccess` menos as leituras sensíveis negadas explicitamente): é a tensão normal do padrão "plan no PR" em GitOps; o conteúdo do PR ainda não foi revisado quando o CI roda.
 
