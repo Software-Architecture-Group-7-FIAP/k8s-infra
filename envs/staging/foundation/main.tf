@@ -54,10 +54,10 @@ module "eks" {
   endpoint_private_access = true
 
   # "audit" is the only log that records which admin principal did what; without it an incident via
-  # the cluster-admin access entries below leaves no trail. Ephemeral session, so 7 days is plenty
-  # and the log group is destroyed with the cluster.
+  # the cluster-admin access entries below leaves no trail. Keep the one-day window from the plan;
+  # the log group is destroyed with the cluster.
   enabled_log_types                      = ["api", "audit", "authenticator"]
-  cloudwatch_log_group_retention_in_days = 7
+  cloudwatch_log_group_retention_in_days = 1
 
   iam_role_path                 = "/auto-shop/"
   iam_role_permissions_boundary = local.project_boundary_arn

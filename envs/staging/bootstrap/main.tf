@@ -20,10 +20,10 @@ resource "aws_iam_openid_connect_provider" "github" {
 # still pass AWS's "Trust policy ... must evaluate ... not scoped to all" validation.
 #
 # `sub` is the ONLY condition here, by design, not by omission: this account's STS only honors `aud`
-# and `sub` as AssumeRoleWithWebIdentity condition context for this OIDC provider. `repository` and
-# `event_name` are present in the decoded token (confirmed via the "Dump OIDC claims" CI step) but
-# are not matched by STS — adding either as a condition makes the role permanently unassumable,
-# confirmed empirically on 2026-10-26 (see var.repositories for the full account of what happened).
+# and `sub` as AssumeRoleWithWebIdentity condition context for this OIDC provider. The GitHub-issued
+# token also contains `repository` and `event_name`, but STS does not match them as condition keys.
+# Requiring either makes the role permanently unassumable; this was confirmed empirically on
+# 2026-10-26 (see var.repositories for the account-specific details).
 # PR content is semi-trusted (it gets ReadOnlyAccess), so the attached policy below denies the
 # data-plane reads it does not need.
 data "aws_iam_policy_document" "plan_trust" {
@@ -98,6 +98,21 @@ data "aws_iam_policy_document" "state" {
 
     condition {
       test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["${each.key}/*"]
+    }
+  }
+
+  # ReadOnlyAccess/PowerUserAccess also grant s3:ListBucket. Explicitly deny listing any prefix
+  # other than this repository's, including requests that omit the prefix entirely.
+  statement {
+    sid       = "DenyListingOutsideOwnPrefix"
+    effect    = "Deny"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}"]
+
+    condition {
+      test     = "StringNotLike"
       variable = "s3:prefix"
       values   = ["${each.key}/*"]
     }

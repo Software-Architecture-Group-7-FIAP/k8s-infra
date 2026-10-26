@@ -28,17 +28,14 @@ variable "repositories" {
     deploy_environments lists the GitHub Environments whose deploy workflow may assume the deploy
     role, matched via the `sub` claim as `repo:ORG@*/REPO@*:environment:<name>`.
 
-    Branch pinning for deploy is NOT done with an IAM condition (job_workflow_ref): empirically,
-    on this AWS account, AssumeRoleWithWebIdentity only honors the `aud` and `sub` claims as trust
-    policy condition keys — `repository`, `event_name`, `environment` and `job_workflow_ref` are
-    present in the decoded ID token (confirmed via the "Dump OIDC claims" CI step) but are not
-    matched as condition context by STS here, and requiring any of them as a condition makes the
-    role permanently unassumable (confirmed the hard way on 2026-10-26: PR #12's plan job failed
-    AssumeRoleWithWebIdentity even though every non-sub claim printed matched the condition exactly;
-    removing them was what fixed it). The branch restriction instead comes from each repository's
-    GitHub Environment deployment-branch policy (configured outside Terraform, via the GitHub API/UI,
-    restricted to `main`): GitHub refuses to even start the job — so no token with that `environment`
-    claim is ever issued — when the running branch doesn't match the policy.
+    Branch pinning for deploy is NOT done with an IAM condition (`job_workflow_ref`): empirical validation
+    in this AWS account found that AssumeRoleWithWebIdentity only honors `aud` and `sub` as trust
+    policy condition keys for this provider. The GitHub-issued token also contains `repository`,
+    `event_name`, `environment` and `job_workflow_ref`, but STS does not match those claims as
+    condition context; requiring them made the role unassumable (confirmed during PR #12 on 2026-10-26).
+    The branch restriction instead comes from each repository's GitHub Environment deployment-branch
+    policy (configured outside Terraform, via the GitHub API/UI, restricted to `main`): GitHub refuses
+    to start the job when the branch does not match. The k8s-infra CI checks its `staging` policy daily.
 
     lambda-auth and auto-shop-system are a later phase; the environments below are a placeholder for
     when those repositories configure matching GitHub Environments, not a current operational grant.
