@@ -5,18 +5,6 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
   partition  = data.aws_partition.current.partition
   oidc_host  = "token.actions.githubusercontent.com"
-
-  # Per repository, from var.repositories.deploy_workflow_files. AWS rejects a leading wildcard here
-  # ("Trust policy ... must evaluate ... which is not scoped to all"), so this has to be an exact
-  # match, not a pattern — unlike `sub`, `job_workflow_ref` is not known to receive GitHub's
-  # immutable-ID treatment (repository/repository_owner IDs already have their own dedicated claims,
-  # so there is no reason for GitHub to also mangle this one); the separate `repository` condition
-  # below is the one pinned to the ID-proof claim regardless.
-  deploy_workflow_refs = {
-    for repo, cfg in var.repositories : repo => [
-      for file in cfg.deploy_workflow_files : "${var.github_org}/${repo}/.github/workflows/${file}@refs/heads/main"
-    ]
-  }
 }
 
 # Account-wide singleton: one GitHub OIDC provider shared by the four repositories.
@@ -26,15 +14,18 @@ resource "aws_iam_openid_connect_provider" "github" {
 }
 
 # Read-only role for terraform plan in pull requests. Scoped to this repository's own pull_request
-# and workflow_dispatch events (the two triggers ci.yml actually uses) via the stable `repository`
-# and `event_name` claims. AWS separately requires every role trusting this OIDC provider to carry a
-# condition on `sub` or `job_workflow_ref` specifically (rejects anything else as "not scoped to
-# all"), so `sub` is also matched here — with the org/repo-id segments wildcarded, since GitHub
-# appends immutable numeric IDs to `sub` for this org (repo:ORG@id/REPO@id:...) and a StringEquals on
-# the old ID-less format silently never matches. The wildcards sit mid-string, not leading, so they
-# still pass AWS's "not scoped to all" check; `repository`/`event_name` above are what actually do
-# the narrow scoping and are unaffected by the ID suffixing. PR content is semi-trusted (it gets
-# ReadOnlyAccess), so the attached policy below also denies the data-plane reads it does not need.
+# and main-branch events via `sub`, with the org/repo-id segments wildcarded: GitHub appends
+# immutable numeric IDs to `sub` for this org (repo:ORG@id/REPO@id:...), so a StringEquals on the
+# old ID-less format silently never matches. The wildcards sit mid-string, not leading, so they
+# still pass AWS's "Trust policy ... must evaluate ... not scoped to all" validation.
+#
+# `sub` is the ONLY condition here, by design, not by omission: this account's STS only honors `aud`
+# and `sub` as AssumeRoleWithWebIdentity condition context for this OIDC provider. `repository` and
+# `event_name` are present in the decoded token (confirmed via the "Dump OIDC claims" CI step) but
+# are not matched by STS — adding either as a condition makes the role permanently unassumable,
+# confirmed empirically on 2026-10-26 (see var.repositories for the full account of what happened).
+# PR content is semi-trusted (it gets ReadOnlyAccess), so the attached policy below denies the
+# data-plane reads it does not need.
 data "aws_iam_policy_document" "plan_trust" {
   for_each = var.repositories
 
@@ -60,25 +51,14 @@ data "aws_iam_policy_document" "plan_trust" {
         "repo:${var.github_org}@*/${each.key}@*:ref:refs/heads/main",
       ]
     }
-
-    condition {
-      test     = "StringEquals"
-      variable = "${local.oidc_host}:repository"
-      values   = ["${var.github_org}/${each.key}"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "${local.oidc_host}:event_name"
-      values   = ["pull_request", "workflow_dispatch"]
-    }
   }
 }
 
-# Deploy role: only assumable from one of this repository's staging-type GitHub Environments AND
-# from the exact apply/destroy workflow file at refs/heads/main (job_workflow_ref, matched by
-# pattern — see deploy_workflow_refs). The environment condition alone is not enough: it is
-# attached to the token regardless of which branch a workflow_dispatch ran from.
+# Deploy role: only assumable from one of this repository's GitHub Environments (var.repositories),
+# matched via `sub` (the proven-reliable claim — see plan_trust) rather than the `environment`
+# condition key. Branch pinning comes from the environment's own deployment-branch policy
+# (configured outside Terraform, restricted to `main`): GitHub never issues a token with this
+# `environment` claim for a run on a different branch, so the job fails before a token exists.
 data "aws_iam_policy_document" "deploy_trust" {
   for_each = var.repositories
 
@@ -97,21 +77,12 @@ data "aws_iam_policy_document" "deploy_trust" {
     }
 
     condition {
-      test     = "StringEquals"
-      variable = "${local.oidc_host}:repository"
-      values   = ["${var.github_org}/${each.key}"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "${local.oidc_host}:environment"
-      values   = each.value.deploy_environments
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "${local.oidc_host}:job_workflow_ref"
-      values   = local.deploy_workflow_refs[each.key]
+      test     = "StringLike"
+      variable = "${local.oidc_host}:sub"
+      values = [
+        for env in each.value.deploy_environments :
+        "repo:${var.github_org}@*/${each.key}@*:environment:${env}"
+      ]
     }
   }
 }
@@ -210,11 +181,18 @@ data "aws_iam_policy_document" "plan_restrictions" {
     resources = ["*"]
   }
 
+  # AWS's own public parameters (arn:...:ssm:REGION::parameter/aws/service/*, no account ID — e.g.
+  # the EKS-optimized AMI lookup the eks module reads at every plan) are never sensitive and are not
+  # excluded here; only the project's own /auto-shop/* namespace and that public namespace are
+  # allowed, everything else in this account is denied.
   statement {
-    sid           = "DenySsmOutsideProjectContract"
-    effect        = "Deny"
-    actions       = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "ssm:GetParameterHistory"]
-    not_resources = ["arn:${local.partition}:ssm:*:${local.account_id}:parameter/auto-shop/*"]
+    sid     = "DenySsmOutsideProjectContract"
+    effect  = "Deny"
+    actions = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "ssm:GetParameterHistory"]
+    not_resources = [
+      "arn:${local.partition}:ssm:*:${local.account_id}:parameter/auto-shop/*",
+      "arn:${local.partition}:ssm:*::parameter/aws/service/*",
+    ]
   }
 }
 

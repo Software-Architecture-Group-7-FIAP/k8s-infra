@@ -26,36 +26,38 @@ variable "repositories" {
   description = <<-EOT
     Repositories allowed to assume a plan role (PR terraform plan) and a deploy role (apply/destroy).
     deploy_environments lists the GitHub Environments whose deploy workflow may assume the deploy
-    role; deploy_workflow_files lists the workflow file basenames (in .github/workflows/) allowed to
-    do so, each matched at refs/heads/main only. k8s-infra and database-infra deploy a single
-    efemeral staging environment from apply.yml/destroy.yml; lambda-auth and auto-shop-system are a
-    later phase and have not fixed their own workflow names yet — the defaults below are a
-    placeholder to be corrected before those repositories' CI/CD is implemented, not a current
-    operational grant (no workflow in either repository names itself this way yet).
-    Trust conditions use the stable repository/environment/job_workflow_ref claims, never the `sub`
-    claim: GitHub appends immutable numeric IDs to `sub` for this org (repo:ORG@id/REPO@id:...),
-    which breaks plain string matching; the dedicated claims are unaffected.
+    role, matched via the `sub` claim as `repo:ORG@*/REPO@*:environment:<name>`.
+
+    Branch pinning for deploy is NOT done with an IAM condition (job_workflow_ref): empirically,
+    on this AWS account, AssumeRoleWithWebIdentity only honors the `aud` and `sub` claims as trust
+    policy condition keys — `repository`, `event_name`, `environment` and `job_workflow_ref` are
+    present in the decoded ID token (confirmed via the "Dump OIDC claims" CI step) but are not
+    matched as condition context by STS here, and requiring any of them as a condition makes the
+    role permanently unassumable (confirmed the hard way on 2026-10-26: PR #12's plan job failed
+    AssumeRoleWithWebIdentity even though every non-sub claim printed matched the condition exactly;
+    removing them was what fixed it). The branch restriction instead comes from each repository's
+    GitHub Environment deployment-branch policy (configured outside Terraform, via the GitHub API/UI,
+    restricted to `main`): GitHub refuses to even start the job — so no token with that `environment`
+    claim is ever issued — when the running branch doesn't match the policy.
+
+    lambda-auth and auto-shop-system are a later phase; the environments below are a placeholder for
+    when those repositories configure matching GitHub Environments, not a current operational grant.
   EOT
   type = map(object({
-    deploy_environments   = list(string)
-    deploy_workflow_files = list(string)
+    deploy_environments = list(string)
   }))
   default = {
     "k8s-infra" = {
-      deploy_environments   = ["staging"]
-      deploy_workflow_files = ["apply.yml", "destroy.yml"]
+      deploy_environments = ["staging"]
     }
     "database-infra" = {
-      deploy_environments   = ["staging"]
-      deploy_workflow_files = ["apply.yml", "destroy.yml"]
+      deploy_environments = ["staging"]
     }
     "lambda-auth" = {
-      deploy_environments   = ["hml", "prd"]
-      deploy_workflow_files = ["apply.yml", "destroy.yml"]
+      deploy_environments = ["hml", "prd"]
     }
     "auto-shop-system" = {
-      deploy_environments   = ["hml", "prd"]
-      deploy_workflow_files = ["apply.yml", "destroy.yml"]
+      deploy_environments = ["hml", "prd"]
     }
   }
 }
