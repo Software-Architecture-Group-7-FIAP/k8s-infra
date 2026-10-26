@@ -457,8 +457,8 @@ resource "aws_iam_role_policy_attachment" "deploy_iam" {
 # k8s-infra deploy role manages node groups, so keep these read permissions out of the shared policy.
 data "aws_iam_policy_document" "k8s_infra_nodegroup_role_read" {
   statement {
-    sid       = "ReadEksNodegroupServiceLinkedRole"
-    actions   = ["iam:GetRole", "iam:ListAttachedRolePolicies"]
+    sid     = "ReadEksNodegroupServiceLinkedRole"
+    actions = ["iam:GetRole", "iam:ListAttachedRolePolicies"]
     resources = [
       "arn:${local.partition}:iam::${local.account_id}:role/aws-service-role/eks-nodegroup.amazonaws.com/AWSServiceRoleForAmazonEKSNodegroup"
     ]
