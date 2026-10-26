@@ -182,7 +182,7 @@ module "eks" {
   eks_managed_node_groups = {
     spot = {
       ami_type       = "AL2023_x86_64_STANDARD"
-      capacity_type  = "SPOT"
+      capacity_type  = "ON_DEMAND"
       instance_types = var.node_instance_types
 
       min_size     = var.node_count
