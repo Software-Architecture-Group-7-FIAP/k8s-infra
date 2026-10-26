@@ -411,24 +411,6 @@ data "aws_iam_policy_document" "deploy_iam" {
     resources = ["arn:${local.partition}:iam::${local.account_id}:role/aws-service-role/*"]
   }
 
-  # EKS checks whether its node-group service-linked role exists during CreateNodegroup. Keep the
-  # role inspection scoped to that exact AWS role and to this repository's deployment principal.
-  statement {
-    sid       = "ReadEksNodegroupServiceLinkedRole"
-    actions   = ["iam:GetRole", "iam:ListAttachedRolePolicies"]
-    resources = [
-      "arn:${local.partition}:iam::${local.account_id}:role/aws-service-role/eks-nodegroup.amazonaws.com/AWSServiceRoleForAmazonEKSNodegroup"
-    ]
-
-    condition {
-      test     = "ArnEquals"
-      variable = "aws:PrincipalArn"
-      values = [
-        "arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}gh-deploy-k8s-infra"
-      ]
-    }
-  }
-
   # Belt and suspenders: even if a statement above were misconfigured, CI roles can never touch
   # themselves, the boundary policy, the deploy-iam policy itself, the state policies, or the OIDC
   # provider (read-only access to all of them is preserved).
@@ -469,4 +451,22 @@ resource "aws_iam_role_policy_attachment" "deploy_iam" {
 
   role       = aws_iam_role.deploy[each.key].name
   policy_arn = aws_iam_policy.deploy_iam.arn
+}
+
+# EKS checks whether its node-group service-linked role exists during CreateNodegroup. Only the
+# k8s-infra deploy role manages node groups, so keep these read permissions out of the shared policy.
+data "aws_iam_policy_document" "k8s_infra_nodegroup_role_read" {
+  statement {
+    sid       = "ReadEksNodegroupServiceLinkedRole"
+    actions   = ["iam:GetRole", "iam:ListAttachedRolePolicies"]
+    resources = [
+      "arn:${local.partition}:iam::${local.account_id}:role/aws-service-role/eks-nodegroup.amazonaws.com/AWSServiceRoleForAmazonEKSNodegroup"
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "k8s_infra_nodegroup_role_read" {
+  name   = "eks-nodegroup-slr-read"
+  role   = aws_iam_role.deploy["k8s-infra"].name
+  policy = data.aws_iam_policy_document.k8s_infra_nodegroup_role_read.json
 }
