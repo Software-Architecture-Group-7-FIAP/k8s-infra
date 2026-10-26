@@ -20,6 +20,18 @@ locals {
   }
 }
 
+# Keep the cluster-admin entry stable across plan (gh-plan) and apply (gh-deploy) identities. The
+# EKS module previously keyed the same deploy entry as `cluster_creator`; move state in place.
+moved {
+  from = module.eks.aws_eks_access_entry.this["cluster_creator"]
+  to   = module.eks.aws_eks_access_entry.this["k8s-infra-deploy"]
+}
+
+moved {
+  from = module.eks.aws_eks_access_policy_association.this["cluster_creator_admin"]
+  to   = module.eks.aws_eks_access_policy_association.this["k8s-infra-deploy_admin"]
+}
+
 module "network" {
   source = "../../../modules/network"
 
@@ -73,9 +85,8 @@ module "eks" {
 
   enable_irsa         = true
   authentication_mode = "API"
-  # EKS automatically creates an admin access entry for the principal that creates the cluster.
-  # The deploy role is that principal, so do not declare it again in access_entries below.
-  enable_cluster_creator_admin_permissions = true
+  # Keep access entries independent of whether Terraform is running as the plan or deploy role.
+  enable_cluster_creator_admin_permissions = false
 
   access_entries = merge(
     {
@@ -90,6 +101,15 @@ module "eks" {
       }
     },
     {
+      k8s-infra-deploy = {
+        principal_arn = "${local.role_arn}/gh-deploy-k8s-infra"
+        policy_associations = {
+          admin = {
+            policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+            access_scope = { type = "cluster" }
+          }
+        }
+      }
       k8s-infra-plan = {
         principal_arn = "${local.role_arn}/gh-plan-k8s-infra"
         policy_associations = {
