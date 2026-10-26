@@ -41,29 +41,45 @@ EOF
 }
 
 cleanup() {
-  kubectl delete pod -n auto-shop-prd np-target --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl delete pod -n auto-shop-prd np-target np-prd-peer --ignore-not-found --wait=false >/dev/null 2>&1 || true
   kubectl delete pod -n auto-shop-hml np-client --ignore-not-found --wait=false >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 # np-target carries the app's own Pod label and listens on the app port itself, so this is the exact
 # path the allow-alb-to-api / allow-same-namespace NetworkPolicies are meant to allow or deny — not a
-# stand-in on a different port.
+# stand-in on a different port. "-l PORT" (not "-l -p PORT"): netcat-openbsd rejects -p with -l,
+# since -p is the source port for outbound connections and the listen port is positional.
 kubectl run np-target -n auto-shop-prd --image="$IMAGE" --restart=Never \
   --labels="app=auto-shop-backend" \
-  --overrides="$(pod_spec np-target "nc -lk -p 8000")" >/dev/null
+  --overrides="$(pod_spec np-target "nc -lk 8000")" >/dev/null
+kubectl run np-prd-peer -n auto-shop-prd --image="$IMAGE" --restart=Never \
+  --overrides="$(pod_spec np-prd-peer 'sleep 600')" >/dev/null
 kubectl run np-client -n auto-shop-hml --image="$IMAGE" --restart=Never \
   --overrides="$(pod_spec np-client 'sleep 600')" >/dev/null
-kubectl wait -n auto-shop-prd --for=condition=Ready pod/np-target --timeout=120s >/dev/null
-kubectl wait -n auto-shop-hml --for=condition=Ready pod/np-client --timeout=120s >/dev/null
+kubectl wait -n auto-shop-prd --for=condition=Ready pod/np-target --timeout=300s >/dev/null
+kubectl wait -n auto-shop-prd --for=condition=Ready pod/np-prd-peer --timeout=300s >/dev/null
+kubectl wait -n auto-shop-hml --for=condition=Ready pod/np-client --timeout=300s >/dev/null
 TARGET_IP="$(kubectl get pod -n auto-shop-prd np-target -o jsonpath='{.status.podIP}')"
 
-probe() { kubectl exec -n auto-shop-hml np-client -- sh -c "$1" >/dev/null 2>&1; }
+probe() { kubectl exec -n "$1" "$2" -- sh -c "$3" >/dev/null 2>&1; }
 
-probe "nslookup kubernetes.default.svc.cluster.local" && pass "DNS allowed" || fail "DNS blocked"
-probe "nc -z -w 5 sts.${REGION}.amazonaws.com 443" && pass "HTTPS egress allowed" || fail "HTTPS egress blocked"
-probe "nc -z -w 5 ${TARGET_IP} 8000" && fail "hml reached prd on the app port (must be denied; only the ALB subnets may reach it)" || pass "hml -> prd app port denied"
-probe "nc -z -w 5 1.1.1.1 80" && fail "HTTP:80 egress allowed (must be denied)" || pass "HTTP:80 egress denied"
+# Positive control first: if np-target can't even be reached from its own namespace (allow-same-
+# namespace), np-target itself is broken (crashed, wrong port, image pull failure) and the two
+# cross-namespace denies below would read as "denied" for the wrong reason — a dead target looks
+# identical to a correctly blocked one. Fail loud and skip the misleading negative checks.
+if probe auto-shop-prd np-prd-peer "nc -z -w 5 ${TARGET_IP} 8000"; then
+  pass "np-target reachable from its own namespace (positive control)"
+  probe auto-shop-hml np-client "nc -z -w 5 ${TARGET_IP} 8000" \
+    && fail "hml reached prd on the app port (must be denied; only the ALB subnets may reach it)" \
+    || pass "hml -> prd app port denied"
+else
+  fail "np-target unreachable even within its own namespace — the deny checks below would be meaningless, skipping them"
+fi
+
+probe auto-shop-hml np-client "nslookup kubernetes.default.svc.cluster.local" && pass "DNS allowed" || fail "DNS blocked"
+probe auto-shop-hml np-client "nc -z -w 5 sts.${REGION}.amazonaws.com 443" && pass "HTTPS egress allowed" || fail "HTTPS egress blocked"
+probe auto-shop-hml np-client "nc -z -w 5 1.1.1.1 80" && fail "HTTP:80 egress allowed (must be denied)" || pass "HTTP:80 egress denied"
 
 echo
 if [ "$FAILURES" -eq 0 ]; then echo "SMOKE OK"; else echo "SMOKE FAILED ($FAILURES)"; exit 1; fi

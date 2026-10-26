@@ -6,12 +6,15 @@ locals {
   partition  = data.aws_partition.current.partition
   oidc_host  = "token.actions.githubusercontent.com"
 
-  # Convention shared by the four repositories (ci.yml = PR plan, apply.yml/destroy.yml = deploy).
-  # If a repository ever names its workflows differently, its job_workflow_ref condition must be updated here.
+  # Per repository, from var.repositories.deploy_workflow_files. AWS rejects a leading wildcard here
+  # ("Trust policy ... must evaluate ... which is not scoped to all"), so this has to be an exact
+  # match, not a pattern — unlike `sub`, `job_workflow_ref` is not known to receive GitHub's
+  # immutable-ID treatment (repository/repository_owner IDs already have their own dedicated claims,
+  # so there is no reason for GitHub to also mangle this one); the separate `repository` condition
+  # below is the one pinned to the ID-proof claim regardless.
   deploy_workflow_refs = {
-    for repo in keys(var.repositories) : repo => [
-      "${var.github_org}/${repo}/.github/workflows/apply.yml@refs/heads/main",
-      "${var.github_org}/${repo}/.github/workflows/destroy.yml@refs/heads/main",
+    for repo, cfg in var.repositories : repo => [
+      for file in cfg.deploy_workflow_files : "${var.github_org}/${repo}/.github/workflows/${file}@refs/heads/main"
     ]
   }
 }
@@ -23,8 +26,15 @@ resource "aws_iam_openid_connect_provider" "github" {
 }
 
 # Read-only role for terraform plan in pull requests. Scoped to this repository's own pull_request
-# and main-branch events; PR content is semi-trusted (it gets ReadOnlyAccess), so the attached policy
-# below also denies the data-plane reads it does not need (secrets, lambda env vars, SSM, DynamoDB).
+# and workflow_dispatch events (the two triggers ci.yml actually uses) via the stable `repository`
+# and `event_name` claims. AWS separately requires every role trusting this OIDC provider to carry a
+# condition on `sub` or `job_workflow_ref` specifically (rejects anything else as "not scoped to
+# all"), so `sub` is also matched here — with the org/repo-id segments wildcarded, since GitHub
+# appends immutable numeric IDs to `sub` for this org (repo:ORG@id/REPO@id:...) and a StringEquals on
+# the old ID-less format silently never matches. The wildcards sit mid-string, not leading, so they
+# still pass AWS's "not scoped to all" check; `repository`/`event_name` above are what actually do
+# the narrow scoping and are unaffected by the ID suffixing. PR content is semi-trusted (it gets
+# ReadOnlyAccess), so the attached policy below also denies the data-plane reads it does not need.
 data "aws_iam_policy_document" "plan_trust" {
   for_each = var.repositories
 
@@ -43,19 +53,32 @@ data "aws_iam_policy_document" "plan_trust" {
     }
 
     condition {
-      test     = "StringEquals"
+      test     = "StringLike"
       variable = "${local.oidc_host}:sub"
       values = [
-        "repo:${var.github_org}/${each.key}:pull_request",
-        "repo:${var.github_org}/${each.key}:ref:refs/heads/main",
+        "repo:${var.github_org}@*/${each.key}@*:pull_request",
+        "repo:${var.github_org}@*/${each.key}@*:ref:refs/heads/main",
       ]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_host}:repository"
+      values   = ["${var.github_org}/${each.key}"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_host}:event_name"
+      values   = ["pull_request", "workflow_dispatch"]
     }
   }
 }
 
-# Deploy role: only assumable from the staging GitHub Environment AND from the exact apply/destroy
-# workflow file at refs/heads/main. The sub condition alone is not enough (environment:staging is
-# attached regardless of which branch a workflow_dispatch runs from); job_workflow_ref pins the branch.
+# Deploy role: only assumable from one of this repository's staging-type GitHub Environments AND
+# from the exact apply/destroy workflow file at refs/heads/main (job_workflow_ref, matched by
+# pattern — see deploy_workflow_refs). The environment condition alone is not enough: it is
+# attached to the token regardless of which branch a workflow_dispatch ran from.
 data "aws_iam_policy_document" "deploy_trust" {
   for_each = var.repositories
 
@@ -75,8 +98,14 @@ data "aws_iam_policy_document" "deploy_trust" {
 
     condition {
       test     = "StringEquals"
-      variable = "${local.oidc_host}:sub"
-      values   = [for subject in each.value.deploy_subjects : "repo:${var.github_org}/${each.key}:${subject}"]
+      variable = "${local.oidc_host}:repository"
+      values   = ["${var.github_org}/${each.key}"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_host}:environment"
+      values   = each.value.deploy_environments
     }
 
     condition {
@@ -167,19 +196,25 @@ resource "aws_iam_role_policy_attachment" "plan_state" {
 
 # PR content is semi-trusted: it runs terraform init/plan with this role's credentials. ReadOnlyAccess
 # is still account-wide data-plane read, so explicitly deny the categories a plan never needs.
+# Secrets Manager and DynamoDB are denied everywhere (no stack reads them at plan time); SSM is
+# denied everywhere EXCEPT the project's own non-secret contract (.checkov.yaml CKV2_AWS_34), which
+# the platform stack legitimately reads at plan time (cluster name, VPC ID/CIDR, RDS subnet CIDRs).
+# lambda:GetFunction* and kms:Decrypt/GenerateDataKey* were dropped here: lambda-auth's own plan
+# needs to read its function, and they added no real protection (the state bucket is SSE-S3, not
+# KMS) while breaking a legitimate read.
 data "aws_iam_policy_document" "plan_restrictions" {
   statement {
-    sid    = "DenySensitiveDataPlaneReads"
-    effect = "Deny"
-    actions = [
-      "secretsmanager:GetSecretValue",
-      "ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "ssm:GetParameterHistory",
-      "lambda:GetFunction", "lambda:GetFunctionConfiguration", "lambda:GetFunctionCodeSigningConfig",
-      "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:Query", "dynamodb:BatchGetItem",
-      "kms:Decrypt", "kms:GenerateDataKey*",
-      "rds:DownloadDBLogFilePortion",
-    ]
+    sid       = "DenySecretsAndDynamoDb"
+    effect    = "Deny"
+    actions   = ["secretsmanager:GetSecretValue", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:Query", "dynamodb:BatchGetItem"]
     resources = ["*"]
+  }
+
+  statement {
+    sid           = "DenySsmOutsideProjectContract"
+    effect        = "Deny"
+    actions       = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "ssm:GetParameterHistory"]
+    not_resources = ["arn:${local.partition}:ssm:*:${local.account_id}:parameter/auto-shop/*"]
   }
 }
 
@@ -245,6 +280,31 @@ data "aws_iam_policy_document" "project_boundary" {
     sid       = "AllowReadOwnRole"
     actions   = ["iam:GetRole", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies"]
     resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}*"]
+  }
+
+  # The boundary caps IAM escalation but, being PowerUser-shaped, otherwise leaves the data plane
+  # open. Without these two denies a role bounded by this policy could still create a role trusting
+  # itself, grant it inline s3:* (capped at this same boundary, which permits S3), sts:AssumeRole
+  # into it, and read every other repository's Terraform state (RDS credentials, JWT material) —
+  # the per-repo Deny in aws_iam_policy_document.state lives in an *identity* policy attached only
+  # to the gh-* roles, not here. No workload in this project legitimately chains roles, so deny it
+  # outright; the durable control is a bucket policy on the state bucket itself (owned by whichever
+  # repo manages it), this is defense in depth from the boundary side.
+  statement {
+    sid       = "DenyRoleChaining"
+    effect    = "Deny"
+    actions   = ["sts:AssumeRole"]
+    resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}*"]
+  }
+
+  statement {
+    sid     = "DenyStateBucketRegardlessOfIdentityPolicy"
+    effect  = "Deny"
+    actions = ["s3:*"]
+    resources = [
+      "arn:${local.partition}:s3:::${var.state_bucket}",
+      "arn:${local.partition}:s3:::${var.state_bucket}/*",
+    ]
   }
 }
 

@@ -92,7 +92,12 @@ Convenção exigida do `database-infra`: segredo de runtime em `auto-shop/stagin
 Pré-requisitos: Terraform 1.15, AWS CLI v2 autenticado na conta `035611741563`, kubectl.
 
 ```bash
-# Uma vez (persistente, gratuito)
+# Sempre que envs/staging/bootstrap mudar, ANTES do merge — rodar como o usuário IAM admin
+# (gustavo-ferreira). As roles de CI não têm permissão para alterar a si mesmas, a boundary, as
+# políticas de state/plan-restrictions nem o provedor OIDC (DenyEditingCiIdentities), então um PR
+# que mude esse stack nunca se autoaplica; sem isso, a primeira sessão falha ao criar a role do
+# cluster/node group com "NoSuchEntity: policy .../auto-shop-boundary does not exist" — depois de já
+# ter criado a VPC e o NAT. apply.yml confere a existência da boundary antes de aplicar foundation.
 terraform -chdir=envs/staging/bootstrap init && terraform -chdir=envs/staging/bootstrap apply
 
 # Abrir sessão (cobrável)
@@ -114,7 +119,7 @@ terraform -chdir=envs/staging/foundation destroy
 | `apply.yml` | merge em `main` com `STAGING_ACTIVE=true`, ou manual | apply foundation → platform + smoke test |
 | `destroy.yml` | manual (confirmar `destroy`) e diário às 02:00 UTC | destroy platform → foundation + checagem de órfãos |
 
-Autenticação somente por OIDC (variáveis `AWS_PLAN_ROLE_ARN`, `AWS_DEPLOY_ROLE_ARN`); nenhuma access key. O papel de deploy só é assumível a partir de `apply.yml`/`destroy.yml` executando em `refs/heads/main` (condição `job_workflow_ref`, além do `environment:staging`): um `workflow_dispatch` disparado de outra branch não qualifica. O papel de plan (usado em PRs, com o conteúdo do PR ainda não revisado) nega explicitamente leituras sensíveis que o `ReadOnlyAccess` concederia por padrão (segredos, parâmetros SSM, variáveis de ambiente de Lambda, itens de DynamoDB). Ações de terceiros fixadas por SHA de commit.
+Autenticação somente por OIDC (variáveis `AWS_PLAN_ROLE_ARN`, `AWS_DEPLOY_ROLE_ARN`); nenhuma access key. O papel de deploy só é assumível a partir de `apply.yml`/`destroy.yml` executando em `refs/heads/main` (condição `job_workflow_ref` com valor exato) e do GitHub Environment `staging`: um `workflow_dispatch` disparado de outra branch não qualifica. O papel de plan (usado em PRs, com o conteúdo do PR ainda não revisado) é restrito ao repositório e aos eventos `pull_request`/`workflow_dispatch` (claims `repository`/`event_name`), e nega leituras sensíveis que o `ReadOnlyAccess` concederia por padrão (segredos, DynamoDB, parâmetros SSM fora de `/auto-shop/*`). As condições evitam o claim `sub` sempre que possível: o GitHub passou a incluir IDs numéricos imutáveis nele para esta organização (`repo:ORG@id/REPO@id:...`), o que quebra comparação de string simples; onde a AWS exige uma condição em `sub` ou `job_workflow_ref` (ela rejeita roles OIDC sem uma delas), o `sub` é comparado com `StringLike` e os segmentos de ID em wildcard no meio da string (nunca no início — a AWS rejeita padrões "não escopados"). Ações de terceiros fixadas por SHA de commit.
 
 ## Custo (us-east-1, preços públicos de 2026-10-25)
 

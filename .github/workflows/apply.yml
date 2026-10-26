@@ -42,6 +42,14 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-duration-seconds: 3600
 
+      - name: Preflight — bootstrap stack must be applied first
+        run: |
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          if ! aws iam get-policy --policy-arn "arn:aws:iam::${account_id}:policy/auto-shop/auto-shop-boundary" >/dev/null 2>&1; then
+            echo "::error::envs/staging/bootstrap is not applied (or is stale) in this account — the deploy role cannot create it (DenyEditingCiIdentities); apply it manually as the admin user first." >&2
+            exit 1
+          fi
+
       - name: Apply foundation (network, EKS, ALB, SSM contract)
         run: |
           terraform -chdir=envs/staging/foundation init -input=false
