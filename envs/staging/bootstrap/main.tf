@@ -235,8 +235,9 @@ resource "aws_iam_role" "deploy" {
   max_session_duration = 7200
 }
 
-# Trade-off documented in README/ADR-0071: PowerUserAccess (no IAM/Organizations) plus a permissions
-# boundary (below) that caps anything a deploy role creates, including roles it creates itself.
+# Deploy roles use PowerUserAccess plus the scoped IAM policy below. The boundary is required for
+# roles they create; it is not attached to deploy roles because it denies access to the shared state
+# bucket Terraform needs. Explicit denies in the IAM policy prevent CI roles from editing themselves.
 resource "aws_iam_role_policy_attachment" "deploy_poweruser" {
   for_each = var.repositories
 
@@ -408,6 +409,24 @@ data "aws_iam_policy_document" "deploy_iam" {
     sid       = "ServiceLinkedRoles"
     actions   = ["iam:CreateServiceLinkedRole"]
     resources = ["arn:${local.partition}:iam::${local.account_id}:role/aws-service-role/*"]
+  }
+
+  # EKS checks whether its node-group service-linked role exists during CreateNodegroup. Keep the
+  # role inspection scoped to that exact AWS role and to this repository's deployment principal.
+  statement {
+    sid       = "ReadEksNodegroupServiceLinkedRole"
+    actions   = ["iam:GetRole", "iam:ListAttachedRolePolicies"]
+    resources = [
+      "arn:${local.partition}:iam::${local.account_id}:role/aws-service-role/eks-nodegroup.amazonaws.com/AWSServiceRoleForAmazonEKSNodegroup"
+    ]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values = [
+        "arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}gh-deploy-k8s-infra"
+      ]
+    }
   }
 
   # Belt and suspenders: even if a statement above were misconfigured, CI roles can never touch

@@ -73,9 +73,8 @@ module "eks" {
 
   enable_irsa         = true
   authentication_mode = "API"
-  # Cheap insurance for the first session: if EKS access entries ever fail to recognize the
-  # path-qualified CI role ARNs (session ARNs don't carry IAM paths), the principal that ran
-  # `terraform apply` still gets in as a fallback admin.
+  # EKS automatically creates an admin access entry for the principal that creates the cluster.
+  # The deploy role is that principal, so do not declare it again in access_entries below.
   enable_cluster_creator_admin_permissions = true
 
   access_entries = merge(
@@ -91,15 +90,6 @@ module "eks" {
       }
     },
     {
-      k8s-infra-deploy = {
-        principal_arn = "${local.role_arn}/gh-deploy-k8s-infra"
-        policy_associations = {
-          admin = {
-            policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-            access_scope = { type = "cluster" }
-          }
-        }
-      }
       k8s-infra-plan = {
         principal_arn = "${local.role_arn}/gh-plan-k8s-infra"
         policy_associations = {
