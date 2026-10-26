@@ -25,7 +25,7 @@ flowchart LR
         ALB["ALB interno<br/>:8001 hml · :8002 prd"]
       end
       subgraph WL["Subnets de workload 10.80.2.0/23 · 10.80.4.0/23"]
-        subgraph EKS["EKS 1.37 · 2x t3/t3a.medium spot"]
+        subgraph EKS["EKS 1.37 · 2x t3/t3a.medium On-Demand"]
           HML["ns auto-shop-hml"]
           PRD["ns auto-shop-prd"]
           OPS["ns auto-shop-ops"]
@@ -52,7 +52,7 @@ flowchart LR
 | Caminho | Conteúdo | Ciclo de vida |
 |---|---|---|
 | `envs/staging/bootstrap` | Provedor OIDC do GitHub, roles `gh-plan-*` e `gh-deploy-*` dos 4 repositórios | Persistente (só IAM, custo zero) |
-| `envs/staging/foundation` | VPC, NAT, EKS, node group spot, add-ons EKS, ALB interno, contrato SSM | Efêmero (por sessão) |
+| `envs/staging/foundation` | VPC, NAT, EKS, node group On-Demand, add-ons EKS, ALB interno, contrato SSM | Efêmero (por sessão) |
 | `envs/staging/platform` | LB Controller, ESO, Pod Identity, namespaces, quota, LimitRange, PSS, RBAC, NetworkPolicy | Efêmero (por sessão) |
 | `modules/` | `network`, `alb`, `ssm-contract`, com testes `terraform test` | — |
 | `scripts/` | `smoke.sh`, `orphans.sh`, `plan-summary.sh` | — |
@@ -101,6 +101,7 @@ Pré-requisitos: Terraform 1.15, AWS CLI v2 autenticado na conta `035611741563`,
 terraform -chdir=envs/staging/bootstrap init && terraform -chdir=envs/staging/bootstrap apply
 
 # Abrir sessão (cobrável)
+# A conta AWS deve permitir o uso pago de EC2; o plano Free bloqueia estes tipos de instância.
 terraform -chdir=envs/staging/foundation init && terraform -chdir=envs/staging/foundation apply
 terraform -chdir=envs/staging/platform init && terraform -chdir=envs/staging/platform apply
 ./scripts/smoke.sh
@@ -126,12 +127,12 @@ Autenticação somente por OIDC (variáveis `AWS_PLAN_ROLE_ARN`, `AWS_DEPLOY_ROL
 | Item | US$/h |
 |---|---|
 | EKS control plane | 0,100 |
-| 2 nodes spot t3/t3a.medium (média) | 0,033 |
+| 2 nodes On-Demand t3/t3a.medium (até 2 × t3.medium) | 0,083 |
 | NAT Gateway + IPv4 | 0,050 |
 | ALB interno + 1 LCU | 0,031 |
-| **Total deste repositório** | **~0,21** |
+| **Total deste repositório** | **~0,26** |
 
-Sessão de 5 h ≈ US$ 1,10 só deste repositório. Esquecido ligado: ~US$ 5 por dia; o `destroy.yml` noturno evita isso. Bucket de state: centavos por mês.
+Sessão de 5 h ≈ US$ 1,32 só deste repositório. Esquecido ligado: ~US$ 6,34 por dia; o `destroy.yml` noturno evita isso. Bucket de state: centavos por mês.
 
 ## Segurança: controles implementados
 

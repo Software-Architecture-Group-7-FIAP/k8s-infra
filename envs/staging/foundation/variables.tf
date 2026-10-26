@@ -41,7 +41,7 @@ variable "addon_versions" {
 }
 
 variable "node_instance_types" {
-  description = "Spot instance types for the managed node group (2 vCPU each; account quota is 5 vCPU)."
+  description = "On-Demand node group instance types (2 vCPU each; account quota is 5 vCPU)."
   type        = list(string)
   default     = ["t3.medium", "t3a.medium"]
 }
