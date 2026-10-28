@@ -111,6 +111,38 @@ resource "kubernetes_network_policy_v1" "https" {
   }
 }
 
+# Bootstrap Jobs in auto-shop-ops use EKS Pod Identity. Permit only the node-local agent endpoint;
+# the general HTTPS policy above deliberately excludes all other link-local destinations.
+resource "kubernetes_network_policy_v1" "pod_identity_agent" {
+  metadata {
+    name      = "allow-pod-identity-agent"
+    namespace = local.ops_namespace
+  }
+
+  spec {
+    pod_selector {}
+    policy_types = ["Egress"]
+
+    egress {
+      to {
+        ip_block {
+          cidr = "169.254.170.23/32"
+        }
+      }
+
+      ports {
+        protocol = "TCP"
+        port     = "80"
+      }
+
+      ports {
+        protocol = "TCP"
+        port     = "2703"
+      }
+    }
+  }
+}
+
 # App <-> Redis/MailHog stay inside the namespace. In auto-shop-ops this is also what allows a
 # migration/bootstrap Job's own components (if any) to talk to each other; hml and prd never reach
 # each other because each namespace only matches its own pods.

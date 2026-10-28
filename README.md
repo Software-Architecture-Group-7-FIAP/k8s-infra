@@ -151,7 +151,7 @@ Registradas no ADR-0071 e suprimidas em `.checkov.yaml`:
 - **Endpoint do EKS público + privado**, autenticado por IAM (access entries), para evitar runner CodeBuild dentro da VPC.
 - **ALB interno em HTTP**: só alcançável dentro da VPC pelo VPC Link; TLS termina no API Gateway.
 - **Sem access logs no ALB** e sem deletion protection (ambiente efêmero).
-- **NetworkPolicy em modo `standard`** com default-deny explícito nos namespaces do projeto; o modo `strict` bloquearia add-ons de `kube-system` sem políticas.
+- **NetworkPolicy em modo `standard`** com default-deny explícito nos namespaces do projeto; o modo `strict` bloquearia add-ons de `kube-system` sem políticas. Em `auto-shop-ops`, o acesso ao EKS Pod Identity agent fica limitado a `169.254.170.23/32` nas portas TCP `80` e `2703`; os demais destinos link-local continuam bloqueados.
 - **Roles de deploy com `PowerUserAccess`** e política IAM restrita ao path `/auto-shop/`; elas não podem alterar as próprias identidades nem acessar o state de outros repositórios. Roles criadas por elas precisam carregar `auto-shop-boundary`. A boundary não está anexada às roles de deploy porque bloqueia o bucket compartilhado usado pelo Terraform state.
 - **Sem criptografia de Secrets por CMK adicional**: o etcd já é criptografado pela chave padrão gerenciada pela AWS; uma CMK extra ficaria em `PendingDeletion` por 7 dias após cada teardown, com custo residual. Reavaliar num ambiente de vida mais longa.
 - **PR com `terraform plan` usa credenciais reais** (role `gh-plan-*`, `ReadOnlyAccess` menos as leituras sensíveis negadas explicitamente): é a tensão normal do padrão "plan no PR" em GitOps; o conteúdo do PR ainda não foi revisado quando o CI roda.
