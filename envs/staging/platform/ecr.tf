@@ -1,4 +1,6 @@
 resource "aws_ecr_repository" "auto_shop_system" {
+  # checkov:skip=CKV_AWS_163:Scan-on-push is configured by the registry-level rule below; this Checkov version only detects the deprecated repository-level setting.
+  # checkov:skip=CKV_AWS_136:This staging repository uses AWS-managed AES256 encryption; changing its encryption would require replacement, and customer-managed key auditing is not required for app images.
   name                 = "auto-shop-system"
   image_tag_mutability = "IMMUTABLE"
   force_delete         = false
