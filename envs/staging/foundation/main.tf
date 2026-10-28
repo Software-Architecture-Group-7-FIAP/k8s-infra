@@ -56,14 +56,16 @@ module "eks" {
 
   name               = var.name
   kubernetes_version = var.kubernetes_version
+  ip_family          = "ipv4"
 
   vpc_id                   = module.network.vpc_id
   subnet_ids               = module.network.workload_subnet_ids
   control_plane_subnet_ids = module.network.workload_subnet_ids
 
   # ADR-0071 revision 2026-10-25: public + private endpoint, IAM-authenticated; no CodeBuild runner.
-  endpoint_public_access  = true
-  endpoint_private_access = true
+  endpoint_public_access       = true
+  endpoint_public_access_cidrs = var.cluster_endpoint_public_access_cidrs
+  endpoint_private_access      = true
 
   # "audit" is the only log that records which admin principal did what; without it an incident via
   # the cluster-admin access entries below leaves no trail. Keep the one-day window from the plan;
