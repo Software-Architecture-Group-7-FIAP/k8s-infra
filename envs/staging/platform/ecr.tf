@@ -1,0 +1,55 @@
+resource "aws_ecr_repository" "auto_shop_system" {
+  name                 = "auto-shop-system"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = false
+
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+}
+
+# BASIC scan-on-push does not add Inspector cost. The account currently has no
+# registry scanning rules, so this rule scopes scanning to this application repo.
+resource "aws_ecr_registry_scanning_configuration" "this" {
+  scan_type = "BASIC"
+
+  rule {
+    scan_frequency = "SCAN_ON_PUSH"
+
+    repository_filter {
+      filter      = aws_ecr_repository.auto_shop_system.name
+      filter_type = "WILDCARD"
+    }
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "auto_shop_system" {
+  repository = aws_ecr_repository.auto_shop_system.name
+
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Expire untagged images after one day"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 1
+        }
+        action = { type = "expire" }
+      },
+      {
+        rulePriority = 2
+        description  = "Keep the ten most recent main images"
+        selection = {
+          tagStatus     = "tagged"
+          tagPrefixList = ["main-"]
+          countType     = "imageCountMoreThan"
+          countNumber   = 10
+        }
+        action = { type = "expire" }
+      }
+    ]
+  })
+}

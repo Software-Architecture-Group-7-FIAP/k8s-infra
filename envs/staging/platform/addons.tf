@@ -10,11 +10,9 @@ locals {
   project_boundary_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/auto-shop/auto-shop-boundary"
 }
 
-# aws:SourceArn pins this trust to THIS cluster: without it, any principal able to call
-# eks:CreatePodIdentityAssociation on any cluster in the account (every gh-deploy-* role has
-# PowerUserAccess, which includes EKS) could bind its own namespace/ServiceAccount to these roles
-# and, for ESO, read every auto-shop/staging/*/app-runtime secret across both environments.
-data "aws_iam_policy_document" "pod_identity_trust" {
+# The cluster ARN prevents cross-cluster use. Each role also pins the namespace and ServiceAccount
+# request tags so another association on this cluster cannot reuse the controller roles.
+data "aws_iam_policy_document" "lbc_pod_identity_trust" {
   statement {
     actions = ["sts:AssumeRole", "sts:TagSession"]
 
@@ -34,6 +32,53 @@ data "aws_iam_policy_document" "pod_identity_trust" {
       variable = "aws:SourceArn"
       values   = [data.aws_eks_cluster.this.arn]
     }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/kubernetes-namespace"
+      values   = ["kube-system"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/kubernetes-service-account"
+      values   = ["aws-load-balancer-controller"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "eso_pod_identity_trust" {
+  statement {
+    actions = ["sts:AssumeRole", "sts:TagSession"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["pods.eks.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [data.aws_eks_cluster.this.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/kubernetes-namespace"
+      values   = ["external-secrets"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/kubernetes-service-account"
+      values   = ["external-secrets"]
+    }
   }
 }
 
@@ -46,7 +91,7 @@ data "aws_iam_policy_document" "pod_identity_trust" {
 resource "aws_iam_role" "lbc" {
   name                 = "auto-shop-staging-aws-load-balancer-controller"
   path                 = "/auto-shop/"
-  assume_role_policy   = data.aws_iam_policy_document.pod_identity_trust.json
+  assume_role_policy   = data.aws_iam_policy_document.lbc_pod_identity_trust.json
   permissions_boundary = local.project_boundary_arn
 }
 
@@ -101,7 +146,7 @@ resource "helm_release" "lbc" {
 resource "aws_iam_role" "eso" {
   name                 = "auto-shop-staging-external-secrets"
   path                 = "/auto-shop/"
-  assume_role_policy   = data.aws_iam_policy_document.pod_identity_trust.json
+  assume_role_policy   = data.aws_iam_policy_document.eso_pod_identity_trust.json
   permissions_boundary = local.project_boundary_arn
 }
 

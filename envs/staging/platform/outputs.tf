@@ -12,3 +12,8 @@ output "load_balancer_controller_role_arn" {
   description = "Pod Identity role of the AWS Load Balancer Controller."
   value       = aws_iam_role.lbc.arn
 }
+
+output "application_image_repository_url" {
+  description = "Immutable-tag ECR repository used by auto-shop-system."
+  value       = aws_ecr_repository.auto_shop_system.repository_url
+}
