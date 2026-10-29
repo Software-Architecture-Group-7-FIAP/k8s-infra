@@ -60,7 +60,7 @@
                 "elasticloadbalancing:RegisterTargets",
                 "elasticloadbalancing:DeregisterTargets"
             ],
-            "Resource": "arn:aws:elasticloadbalancing:*:*:targetgroup/*/*"
+            "Resource": "arn:aws:elasticloadbalancing:us-east-1:035611741563:targetgroup/auto-shop-staging-*/*"
         }
     ]
 }
