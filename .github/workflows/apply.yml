@@ -18,6 +18,8 @@ concurrency:
 env:
   TF_VERSION: 1.15.8
   TF_IN_AUTOMATION: "true"
+  EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
+  TF_VAR_cluster_endpoint_public_access_cidrs: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
 
 jobs:
   apply:
@@ -37,6 +39,7 @@ jobs:
           terraform_wrapper: false
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        id: aws_credentials
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -52,15 +55,29 @@ jobs:
 
       - name: Apply foundation (network, EKS, ALB, SSM contract)
         run: |
+          set -euo pipefail
           terraform -chdir=envs/staging/foundation init -input=false
-          terraform -chdir=envs/staging/foundation apply -input=false -auto-approve -lock-timeout=300s > /dev/null
+          plan_file="$(mktemp)"
+          plan_json="$(mktemp)"
+          trap 'rm -f "$plan_file" "$plan_json"' EXIT
+          terraform -chdir=envs/staging/foundation plan -input=false -lock-timeout=300s -out="$plan_file" > /dev/null
+          terraform -chdir=envs/staging/foundation show -json "$plan_file" > "$plan_json"
+          bash scripts/validate-eks-endpoint-plan.sh "$plan_json"
+          terraform -chdir=envs/staging/foundation apply -input=false -auto-approve -lock-timeout=300s "$plan_file" > /dev/null
           echo "foundation applied" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Temporarily allow the Actions runner to access the EKS API
+        run: bash scripts/eks-endpoint-access.sh add-runner
 
       - name: Apply platform (add-ons, namespaces, policies)
         run: |
           terraform -chdir=envs/staging/platform init -input=false
           terraform -chdir=envs/staging/platform apply -input=false -auto-approve -lock-timeout=300s > /dev/null
           echo "platform applied" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore the administrator-only EKS endpoint allowlist
+        if: ${{ always() && steps.aws_credentials.outcome == 'success' }}
+        run: bash scripts/eks-endpoint-access.sh restore-admin
 
       - name: Smoke test
         run: ./scripts/smoke.sh | tee -a "$GITHUB_STEP_SUMMARY"

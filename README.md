@@ -156,9 +156,23 @@ Registradas no ADR-0071 e suprimidas em `.checkov.yaml`:
 - **Sem criptografia de Secrets por CMK adicional**: o etcd já é criptografado pela chave padrão gerenciada pela AWS; uma CMK extra ficaria em `PendingDeletion` por 7 dias após cada teardown, com custo residual. Reavaliar num ambiente de vida mais longa.
 - **PR com `terraform plan` usa credenciais reais** (role `gh-plan-*`, `ReadOnlyAccess` menos as leituras sensíveis negadas explicitamente): é a tensão normal do padrão "plan no PR" em GitOps; o conteúdo do PR ainda não foi revisado quando o CI roda.
 
+### Acesso ao endpoint do EKS
+
+O endpoint público da API Kubernetes aceita somente CIDRs administrativos confiáveis. Configure a variável de repositório do GitHub Actions `EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS` como uma lista JSON, por exemplo, `["203.0.113.10/32"]`, e mantenha nela apenas redes administrativas. O Terraform aceita somente CIDRs IPv4 canônicos, únicos e restritos (prefixos `/1` a `/32`). O plano também verifica que o endpoint público e privado continuam ativos e que a allowlist corresponde exatamente à variável configurada.
+
+Os workflows de apply e destroy acrescentam o IP de saída do runner apenas durante as operações no Kubernetes e restauram a lista administrativa ao final. O plano da stack platform é pulado no CI quando o runner não está na allowlist. Para executar essa stack localmente, defina `TF_VAR_cluster_endpoint_public_access_cidrs` com a lista JSON dos CIDRs administrativos autorizados.
+
 ## Limitações conhecidas
 
 - Quota de vCPU standard da conta: 5 (pedido de aumento aberto). O node group é fixo em 2 nodes; Cluster Autoscaler está fora do escopo.
 - Probes de Redis/MailHog em portas diferentes de 8000 podem precisar de NetworkPolicy adicional no repositório da aplicação.
 - Parâmetros do node group (`maxPods`, AMI, versão do Kubernetes) são efetivamente imutáveis dentro de uma sessão: com a quota de 5 vCPU já no limite com 2 nodes de 2 vCPU, uma atualização in-place exigiria capacidade de surge que a conta não tem. Mudar esses parâmetros destruindo e recriando o stack `foundation`, não aplicando sobre um cluster em execução.
 - Depois da primeira sessão, verificar se os access entries reconhecem corretamente os ARNs com path (`arn:aws:iam::...:role/auto-shop/gh-deploy-k8s-infra`) quando assumidos via OIDC — a ARN de sessão do STS não carrega o path, e o EKS historicamente exigia a forma sem path em cenários parecidos. `enable_cluster_creator_admin_permissions = true` cobre esse risco como rede de segurança.
+## Decisões e diagramas da Fase 3
+
+As decisões arquiteturais compartilhadas estão no [auto-shop-system](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/architecture/diagramas-fase-3.md).
+
+- [ADR-0075: HPA sem Cluster Autoscaler](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/architecture/decisions/ADR-0075-hpa-sem-cluster-autoscaler.md)
+- [ADR-0077: HML e PRD por namespace](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/architecture/decisions/ADR-0077-hml-prd-por-namespace.md)
+- [RFC-0001: escolha de AWS](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/rfc/RFC-0001-escolha-cloud-aws.md)
+- [Diagrama de componentes da Fase 3](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/architecture/diagrams/componentes-fase-3.svg)

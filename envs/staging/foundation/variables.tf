@@ -28,6 +28,27 @@ variable "kubernetes_version" {
   default     = "1.37"
 }
 
+variable "cluster_endpoint_public_access_cidrs" {
+  description = "Trusted administrator CIDRs allowed to reach the public EKS Kubernetes API endpoint."
+  type        = list(string)
+  nullable    = false
+
+  validation {
+    condition = (
+      length(var.cluster_endpoint_public_access_cidrs) > 0 &&
+      length(distinct(var.cluster_endpoint_public_access_cidrs)) == length(var.cluster_endpoint_public_access_cidrs) &&
+      alltrue([
+        for cidr in var.cluster_endpoint_public_access_cidrs :
+        can(cidrnetmask(cidr)) && try(
+          cidrsubnet(cidr, 0, 0) == cidr && tonumber(split("/", cidr)[1]) > 0,
+          false
+        )
+      ])
+    )
+    error_message = "Provide unique, canonical IPv4 administrator CIDRs with prefixes from /1 to /32."
+  }
+}
+
 variable "addon_versions" {
   description = "Pinned EKS add-on versions for Kubernetes 1.37 (checked 2026-10-25 with DescribeAddonVersions)."
   type        = map(string)
