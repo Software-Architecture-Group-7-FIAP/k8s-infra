@@ -51,6 +51,22 @@ class BootstrapOidcTrustTests(unittest.TestCase):
         self.assertIn(":ref:refs/heads/main", MAIN_TF)
         self.assertNotIn(":pull_request", MAIN_TF)
 
+    def test_plan_state_policy_is_attached_before_broad_state_policy_is_removed(self):
+        marker = 'resource "aws_iam_role_policy_attachment" "plan_state"'
+        start = MAIN_TF.index(marker)
+        next_resource = MAIN_TF.find('\nresource "', start + len(marker))
+        section = MAIN_TF[start:] if next_resource == -1 else MAIN_TF[start:next_resource]
+
+        self.assertIn("create_before_destroy = true", section)
+
+    def test_plan_restriction_description_does_not_force_policy_replacement(self):
+        marker = 'resource "aws_iam_policy" "plan_restrictions"'
+        start = MAIN_TF.index(marker)
+        next_resource = MAIN_TF.find('\nresource "', start + len(marker))
+        section = MAIN_TF[start:] if next_resource == -1 else MAIN_TF[start:next_resource]
+
+        self.assertIn("ignore_changes = [description]", section)
+
 
 if __name__ == "__main__":
     unittest.main()
