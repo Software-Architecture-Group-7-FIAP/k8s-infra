@@ -17,7 +17,7 @@ module "vpc" {
   intra_subnet_suffix    = "alb"
 
   # Cost decision (ADR-0071): one shared NAT for the whole ephemeral session.
-  enable_nat_gateway     = true
+  enable_nat_gateway     = var.enable_nat_gateway
   single_nat_gateway     = true
   one_nat_gateway_per_az = false
 

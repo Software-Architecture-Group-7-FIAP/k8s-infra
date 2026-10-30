@@ -4,13 +4,18 @@ output "github_oidc_provider_arn" {
 }
 
 output "plan_role_arns" {
-  description = "Role per repository for terraform plan in pull requests (set as AWS_PLAN_ROLE_ARN repository variable)."
+  description = "Role per repository for explicitly authorized Terraform plans (set as AWS_PLAN_ROLE_ARN repository variable)."
   value       = { for repo, role in aws_iam_role.plan : repo => role.arn }
 }
 
 output "deploy_role_arns" {
   description = "Role per repository for apply/deploy (set as AWS_DEPLOY_ROLE_ARN repository variable)."
   value       = { for repo, role in aws_iam_role.deploy : repo => role.arn }
+}
+
+output "orphan_audit_role_arn" {
+  description = "Read-only GitHub OIDC role for the k8s-infra staging orphan audit (set as AWS_AUDIT_ROLE_ARN)."
+  value       = aws_iam_role.orphan_audit.arn
 }
 
 output "project_boundary_arn" {

@@ -1,27 +1,25 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2016
-# Runs terraform plan for one stack and prints a Markdown summary with addresses and actions only.
-# Attribute values are never printed, so plans cannot leak data into logs or the job summary.
+# Prints resource addresses and actions from an already-saved plan, never attribute values.
 set -euo pipefail
 
-STACK_DIR="$1"
-PLAN_FILE="$(mktemp)"
-PLAN_JSON="$(mktemp)"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-trap 'rm -f "$PLAN_FILE" "$PLAN_JSON"' EXIT
+PLAN_FILE="${1:?usage: plan-summary.sh PLAN_FILE STACK_NAME}"
+STACK_NAME="${2:?usage: plan-summary.sh PLAN_FILE STACK_NAME}"
 
-terraform -chdir="$STACK_DIR" init -input=false >/dev/null
-terraform -chdir="$STACK_DIR" plan -input=false -lock-timeout=120s -out="$PLAN_FILE" >/dev/null
-terraform -chdir="$STACK_DIR" show -json "$PLAN_FILE" >"$PLAN_JSON"
+case "$STACK_NAME" in
+  foundation|platform) ;;
+  *) echo "Unsupported stack: $STACK_NAME" >&2; exit 2 ;;
+esac
 
-echo "### $(basename "$STACK_DIR")"
-jq -r '
+if [ ! -f "$PLAN_FILE" ]; then
+  echo "Saved plan file does not exist." >&2
+  exit 2
+fi
+
+echo "### $STACK_NAME"
+terraform show -json "$PLAN_FILE" | jq -r '
   [.resource_changes[]? | select(.change.actions != ["no-op"])] as $changes
   | "Changes: \($changes | length)",
     "",
     ($changes[] | "- `\(.change.actions | join("/"))` \(.address)")
 '
-if [[ "$(basename "$STACK_DIR")" == "foundation" ]]; then
-  bash "$SCRIPT_DIR/validate-eks-endpoint-plan.sh" "$PLAN_JSON"
-fi
 echo
