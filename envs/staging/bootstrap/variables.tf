@@ -16,6 +16,23 @@ variable "github_org" {
   default     = "Software-Architecture-Group-7-FIAP"
 }
 
+variable "github_org_id" {
+  description = "Immutable numeric GitHub organization ID embedded in OIDC subject claims."
+  type        = string
+  default     = "279547328"
+}
+
+variable "github_repository_ids" {
+  description = "Immutable GitHub repository IDs embedded in OIDC subject claims; update if a repository is recreated."
+  type        = map(string)
+  default = {
+    "k8s-infra"        = "1431503198"
+    "database-infra"   = "1420971567"
+    "lambda-auth"      = "1418895421"
+    "auto-shop-system" = "1221936756"
+  }
+}
+
 variable "state_bucket" {
   description = "Terraform state bucket shared by every repository (one key prefix per repository)."
   type        = string
@@ -26,7 +43,8 @@ variable "plan_environments" {
   description = "Protected GitHub Environments allowed to assume a repository's read-only plan role."
   type        = map(list(string))
   default = {
-    "k8s-infra" = ["staging"]
+    "k8s-infra"      = ["staging"]
+    "database-infra" = ["aws-plan"]
   }
 }
 
@@ -59,7 +77,7 @@ variable "repositories" {
   description = <<-EOT
     Repositories allowed to assume a plan role from protected main-branch/Environment workflows and a deploy role (apply/destroy).
     deploy_environments lists the GitHub Environments whose deploy workflow may assume the deploy
-    role, matched via the `sub` claim as `repo:ORG@*/REPO@*:environment:<name>`.
+    role. The `sub` claim uses the exact immutable organization and repository IDs.
 
     Branch pinning for deploy is NOT done with an IAM condition (`job_workflow_ref`): empirical validation
     in this AWS account found that AssumeRoleWithWebIdentity only honors `aud` and `sub` as trust

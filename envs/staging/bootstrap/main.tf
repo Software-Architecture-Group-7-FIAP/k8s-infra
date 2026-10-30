@@ -14,10 +14,8 @@ resource "aws_iam_openid_connect_provider" "github" {
 }
 
 # Read-only role for coordinator-authorized terraform plans from main-branch jobs and explicitly listed
-# protected GitHub Environments. Scoped via `sub`, with the org/repo-id segments wildcarded: GitHub
-# appends immutable numeric IDs to `sub` for this org (repo:ORG@id/REPO@id:...), so a StringEquals
-# on the old ID-less format silently never matches. The wildcards sit mid-string, not leading, so
-# they still pass AWS's "Trust policy ... must evaluate ... not scoped to all" validation.
+# protected GitHub Environments. The `sub` condition matches the immutable organization and repository
+# IDs exactly, so a repository rename or recreation cannot reuse the old repository's AWS trust.
 #
 # `sub` is the ONLY condition here, by design, not by omission: this account's STS only honors `aud`
 # and `sub` as AssumeRoleWithWebIdentity condition context for this OIDC provider. The GitHub-issued
@@ -44,13 +42,13 @@ data "aws_iam_policy_document" "plan_trust" {
     }
 
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "${local.oidc_host}:sub"
       values = concat(
-        ["repo:${var.github_org}@*/${each.key}@*:ref:refs/heads/main"],
+        ["repo:${var.github_org}@${var.github_org_id}/${each.key}@${var.github_repository_ids[each.key]}:ref:refs/heads/main"],
         [
           for env in lookup(var.plan_environments, each.key, []) :
-          "repo:${var.github_org}@*/${each.key}@*:environment:${env}"
+          "repo:${var.github_org}@${var.github_org_id}/${each.key}@${var.github_repository_ids[each.key]}:environment:${env}"
         ]
       )
     }
@@ -80,11 +78,11 @@ data "aws_iam_policy_document" "deploy_trust" {
     }
 
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "${local.oidc_host}:sub"
       values = [
         for env in each.value.deploy_environments :
-        "repo:${var.github_org}@*/${each.key}@*:environment:${env}"
+        "repo:${var.github_org}@${var.github_org_id}/${each.key}@${var.github_repository_ids[each.key]}:environment:${env}"
       ]
     }
   }
@@ -109,9 +107,9 @@ data "aws_iam_policy_document" "orphan_audit_trust" {
     }
 
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "${local.oidc_host}:sub"
-      values   = ["repo:${var.github_org}@*/k8s-infra@*:environment:staging"]
+      values   = ["repo:${var.github_org}@${var.github_org_id}/k8s-infra@${var.github_repository_ids["k8s-infra"]}:environment:staging"]
     }
   }
 }
