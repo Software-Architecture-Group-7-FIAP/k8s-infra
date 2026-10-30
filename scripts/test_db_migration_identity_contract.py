@@ -42,6 +42,31 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
         self.assertIn("`gh-deploy-database-infra`", README)
         self.assertIn("Edit em `auto-shop-ops` (Job de bootstrap de banco)", README)
 
+    def test_only_migration_pods_in_each_app_namespace_can_reach_pod_identity_agent(
+        self,
+    ):
+        marker = 'resource "kubernetes_network_policy_v1" "migration_pod_identity_agent" {'
+        self.assertIn(marker, NETWORK_POLICIES_TF)
+        migration_policy = NETWORK_POLICIES_TF.split(marker, maxsplit=1)[1].split(
+            "\nresource ", maxsplit=1
+        )[0]
+
+        self.assertIn("for_each = local.app_namespaces", migration_policy)
+        self.assertIn(
+            "namespace = kubernetes_namespace_v1.this[each.key].metadata[0].name",
+            migration_policy,
+        )
+        self.assertIn(
+            '"app.kubernetes.io/name"      = "auto-shop-system"', migration_policy
+        )
+        self.assertIn(
+            '"app.kubernetes.io/component" = "migrate"', migration_policy
+        )
+        self.assertIn('cidr = "169.254.170.23/32"', migration_policy)
+        self.assertIn('protocol = "TCP"\n        port     = "80"', migration_policy)
+        self.assertNotIn('port     = "2703"', migration_policy)
+        self.assertNotIn("pod_selector {}", migration_policy)
+
 
 if __name__ == "__main__":
     unittest.main()
