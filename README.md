@@ -187,7 +187,7 @@ Registradas no ADR-0071 e suprimidas em `.checkov.yaml`:
 
 O endpoint público da API Kubernetes aceita somente CIDRs administrativos confiáveis. Configure a variável de repositório do GitHub Actions `EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS` como uma lista JSON, por exemplo, `["203.0.113.10/32"]`, e mantenha nela apenas redes administrativas. O Terraform aceita somente CIDRs IPv4 canônicos, únicos e restritos (prefixos `/1` a `/32`). O plano também verifica que o endpoint público e privado continuam ativos e que a allowlist corresponde exatamente à variável configurada.
 
-Os workflows de apply e destroy acrescentam o IP de saída do runner apenas durante as operações no Kubernetes e restauram a lista administrativa ao final. O plano da stack platform é pulado no CI quando o runner não está na allowlist. Para executar essa stack localmente, defina `TF_VAR_cluster_endpoint_public_access_cidrs` com a lista JSON dos CIDRs administrativos autorizados.
+Os workflows de apply e destroy não alteram a allowlist do endpoint EKS. Para a stack `platform`, eles verificam que o IP de saída do runner já está em `EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS` e falham antes de aplicar ou destruir se não estiver. Mantenha a variável atualizada com os CIDRs administrativos autorizados; o plano da stack `platform` é pulado no CI quando o runner não está na allowlist. Para executar essa stack localmente, defina `TF_VAR_cluster_endpoint_public_access_cidrs` com a mesma lista JSON.
 
 ## Limitações conhecidas
 
