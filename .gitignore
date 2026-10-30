@@ -20,3 +20,7 @@ terraform.rc
 .env.*
 kubeconfig*
 .DS_Store
+
+# Python test artifacts
+__pycache__/
+*.py[cod]
