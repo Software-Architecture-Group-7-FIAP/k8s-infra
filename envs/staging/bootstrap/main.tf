@@ -284,6 +284,10 @@ resource "aws_iam_role_policy_attachment" "plan_state" {
 
   role       = aws_iam_role.plan[each.key].name
   policy_arn = aws_iam_policy.plan_state[each.key].arn
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_iam_role_policy_attachment" "plan_artifacts" {
@@ -455,6 +459,12 @@ resource "aws_iam_policy" "plan_restrictions" {
   path        = var.iam_path
   description = "Denies sensitive data-plane reads for repository-scoped plan roles (ReadOnlyAccess is otherwise account-wide)."
   policy      = data.aws_iam_policy_document.plan_restrictions.json
+
+  # The AWS provider replaces managed policies when description changes. Preserve the attached
+  # deny policy instead of detaching and recreating this security control for metadata alone.
+  lifecycle {
+    ignore_changes = [description]
+  }
 }
 
 resource "aws_iam_role_policy_attachment" "plan_restrictions" {
