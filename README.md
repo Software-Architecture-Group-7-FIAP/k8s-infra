@@ -149,6 +149,8 @@ Pull requests executam validações estáticas e não chamam APIs AWS. Os workfl
 
 Autenticação somente por OIDC (variáveis `AWS_PLAN_ROLE_ARN`, `AWS_DEPLOY_ROLE_ARN` e `AWS_AUDIT_ROLE_ARN`); nenhuma access key. As trust policies comparam apenas `aud` e `sub`, usando `StringEquals` e os IDs imutáveis exatos da organização e do repositório. A role `gh-plan-k8s-infra` é usada por dispatch manual protegido em `main`, após o gate da sessão; PRs não assumem roles AWS. A role `gh-plan-database-infra` usa o Environment `aws-plan` em `main` para o plan read-only pós-merge. As roles de deploy aceitam apenas `environment:<nome>` configurado para cada repositório; a política de deployment-branch do Environment restringe a branch permitida (por exemplo, `main` para `staging` e `aws-plan`). Não há condição IAM em `job_workflow_ref`: validação empírica nesta conta confirmou que o STS não aceita esse claim como condição de trust. O CI verifica a política do Environment `staging`. As roles de plan também negam leituras sensíveis que `ReadOnlyAccess` concederia por padrão (segredos, DynamoDB e parâmetros SSM fora do contrato do projeto). Ações de terceiros são fixadas por SHA de commit.
 
+Os repositórios `k8s-infra`, `database-infra`, `lambda-auth` e `auto-shop-system` devem usar `use_immutable_subject=true` e o template OIDC padrão (`use_default=true`), pois as trust policies validam `sub` com os IDs exatos do GitHub. Se um repositório for recriado, atualize seu ID numérico em `github_repository_ids` e verifique a configuração OIDC antes de aplicar o bootstrap.
+
 ## Custo (us-east-1, preços públicos de 2026-10-25)
 
 | Item | US$/h |
