@@ -22,9 +22,42 @@ variable "state_bucket" {
   default     = "auto-shop-tfstate-035611741563-use1"
 }
 
+variable "plan_environments" {
+  description = "Protected GitHub Environments allowed to assume a repository's read-only plan role."
+  type        = map(list(string))
+  default = {
+    "k8s-infra" = ["staging"]
+  }
+}
+
+variable "plan_state_keys" {
+  description = "Exact S3 state object keys that each plan role may read. Update this map when a Terraform root is added."
+  type        = map(list(string))
+  default = {
+    "k8s-infra" = [
+      "k8s-infra/staging/foundation.tfstate",
+      "k8s-infra/staging/platform.tfstate",
+    ]
+    "database-infra"   = ["database-infra/staging/terraform.tfstate"]
+    "lambda-auth"      = ["lambda-auth/_no_remote_state_configured.tfstate"]
+    "auto-shop-system" = ["auto-shop-system/infra/aws/staging/terraform.tfstate"]
+  }
+}
+
+variable "plan_artifact_prefixes" {
+  description = "S3 object prefixes where each plan role may create private saved plans; empty entries deny plan uploads."
+  type        = map(list(string))
+  default = {
+    "k8s-infra"        = ["k8s-infra/staging/plans/*"]
+    "database-infra"   = []
+    "lambda-auth"      = []
+    "auto-shop-system" = []
+  }
+}
+
 variable "repositories" {
   description = <<-EOT
-    Repositories allowed to assume a plan role (PR terraform plan) and a deploy role (apply/destroy).
+    Repositories allowed to assume a plan role from protected main-branch/Environment workflows and a deploy role (apply/destroy).
     deploy_environments lists the GitHub Environments whose deploy workflow may assume the deploy
     role, matched via the `sub` claim as `repo:ORG@*/REPO@*:environment:<name>`.
 

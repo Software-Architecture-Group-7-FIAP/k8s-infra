@@ -42,10 +42,11 @@ module "network" {
 
   # ADR-0071 plan. 10.80.0.64/26 (former CodeBuild ranges) stays unallocated; 10.80.8.0/21 now hosts
   # the dedicated ALB subnets, leaving 10.80.8.64/27 onward free.
-  public_subnets   = ["10.80.0.0/27", "10.80.0.32/27"]
-  workload_subnets = ["10.80.2.0/23", "10.80.4.0/23"]
-  isolated_subnets = ["10.80.6.0/24", "10.80.7.0/24"]
-  alb_subnets      = ["10.80.8.0/27", "10.80.8.32/27"]
+  public_subnets     = ["10.80.0.0/27", "10.80.0.32/27"]
+  workload_subnets   = ["10.80.2.0/23", "10.80.4.0/23"]
+  isolated_subnets   = ["10.80.6.0/24", "10.80.7.0/24"]
+  alb_subnets        = ["10.80.8.0/27", "10.80.8.32/27"]
+  enable_nat_gateway = var.enable_nat_gateway
 
   tags = local.tags
 }

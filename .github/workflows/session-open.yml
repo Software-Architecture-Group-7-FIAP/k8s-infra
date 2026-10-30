@@ -1,0 +1,65 @@
+name: Session Open Preflight
+run-name: ${{ inputs.session_id }}-foundation-open-preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_mode:
+        description: Authorized lifecycle window
+        required: true
+        type: choice
+        options:
+          - hml
+          - prd-window
+      session_id:
+        description: Coordinator-provided daily session identifier
+        required: true
+        type: string
+      started_at:
+        description: Coordinator-provided UTC session start, YYYY-MM-DDTHH:MM:SSZ
+        required: true
+        type: string
+      session_token:
+        description: Coordinator-signed authorization for this exact session context
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED || 'false' }}
+  PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY || 'false' }}
+  PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED || 'false' }}
+
+jobs:
+  preflight:
+    name: validate session open window
+    if: >-
+      inputs.session_mode == 'hml' ||
+      (inputs.session_mode == 'prd-window' &&
+      vars.ENVIRONMENT_SCHEDULE_ENABLED == 'true' &&
+      vars.PRD_LIFECYCLE_AUTOMATION_READY == 'true' &&
+      vars.PRD_COST_EXCEPTION_APPROVED == 'true')
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate authorized window without AWS credentials
+        env:
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_STARTED_AT: ${{ inputs.started_at }}
+          REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
+          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+          STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
+          STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
+          AUTHORIZED_SESSION_MODE: ${{ vars.STAGING_SESSION_MODE }}
+          ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED || 'false' }}
+          PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY || 'false' }}
+          PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED || 'false' }}
+        run: bash scripts/session-open.sh

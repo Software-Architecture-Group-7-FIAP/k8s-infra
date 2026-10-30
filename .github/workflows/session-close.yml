@@ -1,0 +1,48 @@
+name: Session Close Preflight
+run-name: ${{ inputs.session_id }}-foundation-close-preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_mode:
+        description: Authorized lifecycle window
+        required: true
+        type: choice
+        options:
+          - hml
+          - prd-window
+      session_id:
+        description: Coordinator-provided daily session identifier
+        required: true
+        type: string
+      started_at:
+        description: Coordinator-provided UTC session start, YYYY-MM-DDTHH:MM:SSZ
+        required: true
+        type: string
+      session_token:
+        description: Coordinator-signed authorization for this exact session context
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: validate session close window
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate cleanup window without AWS credentials
+        env:
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_STARTED_AT: ${{ inputs.started_at }}
+          REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
+          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+        run: bash scripts/session-close.sh

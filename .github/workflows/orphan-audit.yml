@@ -1,0 +1,195 @@
+name: Orphan Audit
+run-name: ${{ inputs.session_id }}-all-orphan-audit:${{ inputs.lifecycle_dispatch_id || github.run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_id:
+        description: Coordinator-provided daily session identifier
+        required: true
+        type: string
+      started_at:
+        description: Coordinator-provided UTC session start, YYYY-MM-DDTHH:MM:SSZ
+        required: true
+        type: string
+      session_token:
+        description: Coordinator-signed authorization for this exact session context
+        required: true
+        type: string
+      lifecycle_dispatch_id:
+        description: Coordinator correlation ID for this workflow dispatch
+        required: true
+        type: string
+      session_mode:
+        description: Authorized lifecycle window
+        required: true
+        type: choice
+        options:
+          - hml
+          - prd-window
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: staging-infra
+  cancel-in-progress: false
+
+env:
+  EXPECTED_AWS_ACCOUNT_ID: "035611741563"
+  PLAN_BUCKET: auto-shop-tfstate-035611741563-use1
+
+jobs:
+  audit:
+    name: verify no session resources remain
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 13
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reject a reused lifecycle dispatch ID
+        env:
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+          REQUESTED_SESSION_STARTED_AT: ${{ inputs.started_at }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/assert_unique_lifecycle_dispatch.py --workflow-file orphan-audit.yml
+
+      - name: Validate the explicit cleanup session before AWS access
+        env:
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_STARTED_AT: ${{ inputs.started_at }}
+          REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
+          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_SESSION_TOKEN" ]]; then
+            echo "::add-mask::$REQUESTED_SESSION_TOKEN"
+          fi
+          if [[ -n "$REQUESTED_LIFECYCLE_DISPATCH_ID" && ! "$REQUESTED_LIFECYCLE_DISPATCH_ID" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error::The lifecycle dispatch ID must be 32 lowercase hexadecimal characters."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::The orphan audit is allowed only from main."
+            exit 1
+          fi
+          python3 scripts/validate_staging_session.py \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --started-at "$REQUESTED_STARTED_AT" \
+            --mode "$REQUESTED_SESSION_MODE" \
+            --operation audit \
+            --minimum-remaining-seconds 780
+
+      - name: Validate AWS region before requesting credentials
+        env:
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          if [[ "$REQUESTED_AWS_REGION" != "us-east-1" ]]; then
+            echo "::error::The orphan audit is restricted to us-east-1; received '$REQUESTED_AWS_REGION'."
+            exit 1
+          fi
+
+      - name: Require the dedicated read-only audit role
+        env:
+          AUDIT_ROLE_ARN: ${{ vars.AWS_AUDIT_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$AUDIT_ROLE_ARN" ]]; then
+            echo "::error::Set AWS_AUDIT_ROLE_ARN from the bootstrap orphan_audit_role_arn output before running the audit."
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_AUDIT_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 900
+
+      - name: Verify AWS account and report read-only scope
+        env:
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+          SESSION_ID: ${{ inputs.session_id }}
+        run: |
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          if [[ "$account_id" != "$EXPECTED_AWS_ACCOUNT_ID" ]]; then
+            echo "::error::Expected AWS account $EXPECTED_AWS_ACCOUNT_ID, received $account_id."
+            exit 1
+          fi
+          {
+            echo "### Read-only orphan audit scope"
+            echo "- Account: $account_id"
+            echo "- Region: $REQUESTED_AWS_REGION"
+            echo "- Session: $SESSION_ID"
+            echo "- Reads foundation/platform state addresses and dynamic AWS resource inventories."
+            echo "- VPC, subnets, and persistent SSM contract resources are allowed to remain."
+            echo "- EKS, ALB, NAT, RDS, compute, storage, and session log resources must be absent."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Audit Terraform state roots
+        env:
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          umask 077
+          audit_dir="$(mktemp -d)"
+          chmod 700 "$audit_dir"
+          trap 'rm -rf -- "$audit_dir"' EXIT
+
+          for stack in foundation platform; do
+            state_key="k8s-infra/staging/$stack.tfstate"
+            present_key="$(aws s3api list-objects-v2 \
+              --bucket "$PLAN_BUCKET" \
+              --prefix "$state_key" \
+              --region "$REQUESTED_AWS_REGION" \
+              --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
+              --query "Contents[?Key == '$state_key'].Key | [0]" \
+              --output text)"
+
+            if [[ "$present_key" == "None" || -z "$present_key" ]]; then
+              printf '{"version":4,"resources":[]}\n' > "$audit_dir/$stack-state.json"
+              echo "$stack Terraform state is absent."
+            else
+              aws s3api get-object \
+                --bucket "$PLAN_BUCKET" \
+                --key "$state_key" \
+                --region "$REQUESTED_AWS_REGION" \
+                --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
+                "$audit_dir/$stack-state.json" >/dev/null
+            fi
+            chmod 600 "$audit_dir/$stack-state.json"
+          done
+
+          python3 scripts/verify_session_state.py \
+            --foundation-state "$audit_dir/foundation-state.json" \
+            --platform-state "$audit_dir/platform-state.json" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Audit dynamic AWS resources with read-only APIs
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          SESSION_ID: ${{ inputs.session_id }}
+          SESSION_STARTED_AT: ${{ inputs.started_at }}
+          SESSION_MODE: ${{ inputs.session_mode }}
+          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+          STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
+          STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
+        run: |
+          set -euo pipefail
+          python3 scripts/validate_staging_session.py \
+            --session-id "$SESSION_ID" \
+            --started-at "$SESSION_STARTED_AT" \
+            --mode "$SESSION_MODE" \
+            --operation audit \
+            --minimum-remaining-seconds 600
+          bash scripts/orphans.sh | tee -a "$GITHUB_STEP_SUMMARY"

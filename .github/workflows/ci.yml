@@ -1,22 +1,62 @@
 name: CI
+run-name: ${{ inputs.session_id || github.event.pull_request.number || github.run_id }}-${{ inputs.stack || 'all' }}-${{ inputs.operation || 'plan' }}:${{ inputs.lifecycle_dispatch_id || github.run_id }}
 
 on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: "17 7 * * *"
+    inputs:
+      session_id:
+        description: Coordinator-provided session ID for this daily session
+        required: true
+        type: string
+      started_at:
+        description: Coordinator-provided UTC session start, YYYY-MM-DDTHH:MM:SSZ
+        required: true
+        type: string
+      session_mode:
+        description: Authorized session window
+        required: true
+        type: choice
+        options:
+          - hml
+          - prd-window
+      session_token:
+        description: Coordinator-signed authorization for this exact session context
+        required: true
+        type: string
+      lifecycle_dispatch_id:
+        description: Coordinator correlation ID for this workflow dispatch
+        required: true
+        type: string
+      stack:
+        description: Terraform stack to plan and save for a later reviewed apply
+        required: true
+        type: choice
+        options:
+          - foundation
+          - platform
+      operation:
+        description: Open the session or disable only the shared NAT and its routes
+        required: true
+        default: open
+        type: choice
+        options:
+          - open
+          - nat-disable
+      enable_nat_gateway:
+        description: Keep NAT enabled for open; set false only for the NAT-only close plan
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   TF_VERSION: 1.15.8
   TF_IN_AUTOMATION: "true"
+  EXPECTED_AWS_ACCOUNT_ID: "035611741563"
   TF_VAR_cluster_endpoint_public_access_cidrs: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
 
 jobs:
@@ -47,12 +87,14 @@ jobs:
 
   static:
     name: static
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Test staging session validator
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
@@ -107,16 +149,109 @@ jobs:
 
   plan:
     name: plan
-    if: github.event_name != 'schedule'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     needs: static
+    environment: staging
+    concurrency:
+      group: staging-infra
+      cancel-in-progress: false
+    timeout-minutes: ${{ inputs.operation == 'nat-disable' && 13 || 60 }}
     permissions:
       contents: read
+      actions: read
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Reject a reused lifecycle dispatch ID
+        env:
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+          REQUESTED_SESSION_STARTED_AT: ${{ inputs.started_at }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/assert_unique_lifecycle_dispatch.py --workflow-file ci.yml
+
+      - name: Require an authorized staging session before AWS plan reads
+        env:
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_STARTED_AT: ${{ inputs.started_at }}
+          REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
+          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+          REQUESTED_STACK: ${{ inputs.stack }}
+          REQUESTED_OPERATION: ${{ inputs.operation }}
+          ENABLE_NAT_GATEWAY: ${{ inputs.enable_nat_gateway }}
+          STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
+          STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
+          AUTHORIZED_SESSION_MODE: ${{ vars.STAGING_SESSION_MODE }}
+          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+          ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED || 'false' }}
+          PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY || 'false' }}
+          PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED || 'false' }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_SESSION_TOKEN" ]]; then
+            echo "::add-mask::$REQUESTED_SESSION_TOKEN"
+          fi
+          if [[ -n "$REQUESTED_LIFECYCLE_DISPATCH_ID" && ! "$REQUESTED_LIFECYCLE_DISPATCH_ID" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error::The lifecycle dispatch ID must be 32 lowercase hexadecimal characters."
+            exit 1
+          fi
+          case "$REQUESTED_STACK" in
+            foundation|platform) ;;
+            *) echo "::error::Unsupported Terraform stack."; exit 1 ;;
+          esac
+          case "$REQUESTED_OPERATION" in
+            open)
+              if [[ "$REQUESTED_SESSION_MODE" != "$AUTHORIZED_SESSION_MODE" ]]; then
+                echo "::error::The requested session mode does not match the protected Environment authorization."
+                exit 1
+              fi
+              if [[ "$REQUESTED_SESSION_MODE" == "prd-window" && \
+                ("$ENVIRONMENT_SCHEDULE_ENABLED" != "true" || \
+                "$PRD_LIFECYCLE_AUTOMATION_READY" != "true" || \
+                "$PRD_COST_EXCEPTION_APPROVED" != "true") ]]; then
+                echo "::error::PRD opening requires schedule, automation-readiness, and cost-exception gates."
+                exit 1
+              fi
+              if [[ "$ENABLE_NAT_GATEWAY" != "true" ]]; then
+                echo "::error::Opening plans must retain the NAT gateway."
+                exit 1
+              fi
+              ;;
+            nat-disable)
+              if [[ "$REQUESTED_STACK" != "foundation" || "$ENABLE_NAT_GATEWAY" != "false" ]]; then
+                echo "::error::NAT-only shutdown requires foundation and enable_nat_gateway=false."
+                exit 1
+              fi
+              ;;
+            *) echo "::error::Unsupported lifecycle operation."; exit 1 ;;
+          esac
+          session_operation="work"
+          minimum_remaining_seconds=3600
+          if [[ "$REQUESTED_OPERATION" == "nat-disable" ]]; then
+            session_operation="teardown"
+            minimum_remaining_seconds=900
+          fi
+          python3 scripts/validate_staging_session.py \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --started-at "$REQUESTED_STARTED_AT" \
+            --mode "$REQUESTED_SESSION_MODE" \
+            --operation "$session_operation" \
+            --minimum-remaining-seconds "$minimum_remaining_seconds"
+
+      - name: Validate AWS region before requesting credentials
+        env:
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          if [[ "$REQUESTED_AWS_REGION" != "us-east-1" ]]; then
+            echo "::error::Staging plans are restricted to us-east-1; received '$REQUESTED_AWS_REGION'."
+            exit 1
+          fi
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
@@ -128,34 +263,165 @@ jobs:
           role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Plan bootstrap and foundation
+      - name: Verify AWS account and report planning scope
+        env:
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+          STACK: ${{ inputs.stack }}
         run: |
-          for stack in bootstrap foundation; do
-            ./scripts/plan-summary.sh "envs/staging/$stack" >> "$GITHUB_STEP_SUMMARY"
-          done
-
-      - name: Plan platform (after foundation contracts are published)
-        run: |
-          required_parameters=(
-            "/auto-shop/staging/eks/cluster-name"
-            "/auto-shop/staging/network/vpc-id"
-            "/auto-shop/staging/network/vpc-cidr"
-            "/auto-shop/staging/network/rds-isolated-subnet-cidrs"
-            "/auto-shop/staging/network/alb-subnet-cidrs"
-          )
-          invalid_parameters="$(aws ssm get-parameters --names "${required_parameters[@]}" --query 'InvalidParameters' --output json)"
-          if [[ "$invalid_parameters" == "[]" ]] && aws eks describe-cluster --name auto-shop-staging >/dev/null 2>&1; then
-            set +e
-            bash scripts/eks-endpoint-access.sh runner-allowed
-            runner_access_status=$?
-            set -e
-            if [[ "$runner_access_status" -eq 0 ]]; then
-              ./scripts/plan-summary.sh envs/staging/platform >> "$GITHUB_STEP_SUMMARY"
-            elif [[ "$runner_access_status" -eq 10 ]]; then
-              echo "### platform: skipped (GitHub-hosted runner is outside the restricted EKS endpoint allowlist)" >> "$GITHUB_STEP_SUMMARY"
-            else
-              exit "$runner_access_status"
-            fi
-          else
-            echo "### platform: skipped (foundation or SSM contracts not ready)" >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          if [[ "$account_id" != "$EXPECTED_AWS_ACCOUNT_ID" ]]; then
+            echo "::error::Expected AWS account $EXPECTED_AWS_ACCOUNT_ID, received $account_id."
+            exit 1
           fi
+          {
+            echo "### AWS plan scope"
+            echo "- Account: $account_id"
+            echo "- Region: $REQUESTED_AWS_REGION"
+            echo "- Environment: staging"
+            echo "- Stack: $STACK"
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Cost: Terraform plan does not estimate AWS cost; inspect the current billing view and budget before any apply or destroy."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify private plan bucket controls
+        run: bash scripts/validate_plan_bucket.sh
+
+      - name: Require runner access before planning the platform stack
+        if: inputs.stack == 'platform'
+        run: |
+          set +e
+          bash scripts/eks-endpoint-access.sh runner-allowed
+          runner_access_status=$?
+          set -e
+          if [[ "$runner_access_status" -eq 10 ]]; then
+            echo "::error::The Actions runner is outside the EKS administrator allowlist; no platform plan was saved."
+            exit 1
+          fi
+          if [[ "$runner_access_status" -ne 0 ]]; then
+            exit "$runner_access_status"
+          fi
+
+      - name: Create and store one exact private Terraform plan
+        env:
+          STACK: ${{ inputs.stack }}
+          SESSION_ID: ${{ inputs.session_id }}
+          SESSION_STARTED_AT: ${{ inputs.started_at }}
+          SESSION_MODE: ${{ inputs.session_mode }}
+          PLAN_SCOPE: ${{ inputs.operation }}
+          ENABLE_NAT_GATEWAY: ${{ inputs.enable_nat_gateway }}
+          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          umask 077
+          plan_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$plan_dir"' EXIT
+          plan_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          plan_file="$plan_dir/$STACK.tfplan"
+          plan_json="$plan_dir/plan.json"
+          manifest_file="$plan_dir/manifest.json"
+
+          terraform -chdir="envs/staging/$STACK" init -input=false
+          if [[ "$STACK" == "foundation" ]]; then
+            terraform -chdir="envs/staging/$STACK" plan \
+              -var="enable_nat_gateway=$ENABLE_NAT_GATEWAY" \
+              -input=false \
+              -lock=false \
+              -no-color \
+              -out="$plan_file" >/dev/null
+          else
+            terraform -chdir="envs/staging/$STACK" plan \
+              -input=false \
+              -lock=false \
+              -no-color \
+              -out="$plan_file" >/dev/null
+          fi
+          terraform -chdir="envs/staging/$STACK" show -json "$plan_file" > "$plan_json"
+          if [[ "$STACK" == "foundation" ]]; then
+            bash scripts/validate-eks-endpoint-plan.sh "$plan_json"
+          fi
+          python3 scripts/terraform_plan_guard.py --plan-json "$plan_json" --policy "$PLAN_SCOPE"
+          ./scripts/plan-summary.sh "$plan_file" "$STACK" >> "$GITHUB_STEP_SUMMARY"
+
+          session_operation="work"
+          minimum_remaining_seconds=3600
+          if [[ "$PLAN_SCOPE" == "nat-disable" ]]; then
+            session_operation="teardown"
+            minimum_remaining_seconds=720
+          fi
+          python3 scripts/validate_staging_session.py \
+            --session-id "$SESSION_ID" \
+            --started-at "$SESSION_STARTED_AT" \
+            --mode "$SESSION_MODE" \
+            --operation "$session_operation" \
+            --minimum-remaining-seconds "$minimum_remaining_seconds"
+
+          python3 scripts/terraform_plan_artifact.py create-manifest \
+            --plan-id "$plan_id" \
+            --purpose apply \
+            --aws-account-id "$EXPECTED_AWS_ACCOUNT_ID" \
+            --aws-region "$REQUESTED_AWS_REGION" \
+            --commit-sha "$GITHUB_SHA" \
+            --session-id "$SESSION_ID" \
+            --session-started-at "$SESSION_STARTED_AT" \
+            --session-mode "$SESSION_MODE" \
+            --scope "$PLAN_SCOPE" \
+            --terraform-version "$TF_VERSION" \
+            --output "$manifest_file" \
+            --plan "$STACK=$plan_file"
+
+          attestation_dir="$RUNNER_TEMP/k8s-plan-attestation"
+          mkdir -p "$attestation_dir"
+          chmod 700 "$attestation_dir"
+          python3 scripts/terraform_plan_artifact.py create-attestation \
+            --manifest "$manifest_file" \
+            --output "$attestation_dir/manifest.sha256"
+
+          minimum_remaining_seconds=3600
+          if [[ "$session_operation" == "teardown" ]]; then
+            minimum_remaining_seconds=720
+          fi
+          python3 scripts/validate_staging_session.py \
+            --session-id "$SESSION_ID" \
+            --started-at "$SESSION_STARTED_AT" \
+            --mode "$SESSION_MODE" \
+            --operation "$session_operation" \
+            --minimum-remaining-seconds "$minimum_remaining_seconds"
+
+          plan_base_key="k8s-infra/staging/plans/$plan_id/apply"
+          aws s3api put-object \
+            --bucket auto-shop-tfstate-035611741563-use1 \
+            --key "$plan_base_key/manifest.json" \
+            --body "$manifest_file" \
+            --region "$REQUESTED_AWS_REGION" \
+            --server-side-encryption AES256 \
+            --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
+            --no-cli-pager >/dev/null
+          aws s3api put-object \
+            --bucket auto-shop-tfstate-035611741563-use1 \
+            --key "$plan_base_key/$STACK.tfplan" \
+            --body "$plan_file" \
+            --region "$REQUESTED_AWS_REGION" \
+            --server-side-encryption AES256 \
+            --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
+            --no-cli-pager >/dev/null
+
+          {
+            echo "### Saved plan ready for review"
+            echo "- Plan ID: $plan_id"
+            echo "- Stack: $STACK"
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Private object prefix: s3://auto-shop-tfstate-035611741563-use1/$plan_base_key/"
+            echo "- The saved plan contains sensitive values. Review the resource/action summary above and current cost/budget before dispatching Apply."
+            echo "- A successful apply removes the exact plan and manifest objects. Unconsumed plans remain private in S3 until lifecycle cleanup or an authorized cleanup."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Store the exact manifest digest with the originating workflow run
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: k8s-plan-attestation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/k8s-plan-attestation/manifest.sha256
+          if-no-files-found: error
+          retention-days: 7

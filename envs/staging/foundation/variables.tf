@@ -78,6 +78,12 @@ variable "node_count" {
   }
 }
 
+variable "enable_nat_gateway" {
+  description = "Keep the shared NAT gateway during an active session; set false during scheduled teardown."
+  type        = bool
+  default     = true
+}
+
 variable "node_max_pods" {
   description = "Kubelet maxPods with prefix delegation. Kept low because kube-reserved memory grows 11 MiB per pod."
   type        = number

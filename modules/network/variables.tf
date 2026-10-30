@@ -69,6 +69,12 @@ variable "alb_subnets" {
   }
 }
 
+variable "enable_nat_gateway" {
+  description = "Keep the shared NAT gateway during an active environment session."
+  type        = bool
+  default     = true
+}
+
 variable "cluster_name" {
   description = "EKS cluster name used in subnet discovery tags."
   type        = string

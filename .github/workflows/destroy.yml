@@ -1,16 +1,66 @@
 name: Destroy
+run-name: ${{ inputs.session_id }}-${{ inputs.stack }}-${{ inputs.scope }}-${{ inputs.operation }}:${{ inputs.lifecycle_dispatch_id || github.run_id }}
 
-# Closes a staging session. Also runs nightly as a safety net so nothing stays billing overnight.
+# Teardown is always a separate plan review and explicitly confirmed workflow dispatch.
 on:
   workflow_dispatch:
     inputs:
-      confirm:
-        description: 'Type "destroy" to tear down the staging cluster'
+      operation:
+        description: First create a plan; in a separate run, destroy that exact reviewed plan
         required: true
-  schedule:
-    - cron: "0 2 * * *" # 23:00 America/Sao_Paulo
+        type: choice
+        options:
+          - plan
+          - destroy
+      stack:
+        description: Destroy platform before foundation
+        required: true
+        type: choice
+        options:
+          - platform
+          - foundation
+      scope:
+        description: Use compute for foundation or all for platform; persistent network resources are protected
+        required: true
+        default: compute
+        type: choice
+        options:
+          - all
+          - compute
+      session_id:
+        description: Coordinator-provided session ID
+        required: true
+        type: string
+      started_at:
+        description: Coordinator-provided UTC session start, YYYY-MM-DDTHH:MM:SSZ
+        required: true
+        type: string
+      session_token:
+        description: Coordinator-signed authorization for this exact session context
+        required: true
+        type: string
+      lifecycle_dispatch_id:
+        description: Coordinator correlation ID for this workflow dispatch
+        required: true
+        type: string
+      session_mode:
+        description: Authorized lifecycle window for this teardown
+        required: true
+        type: choice
+        options:
+          - hml
+          - prd-window
+      plan_id:
+        description: Required for operation destroy; use the ID from the reviewed plan run
+        required: false
+        type: string
+      confirm:
+        description: For operation destroy, type destroy after reviewing the plan and current cost/budget
+        required: false
+        type: string
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -21,20 +71,87 @@ concurrency:
 env:
   TF_VERSION: 1.15.8
   TF_IN_AUTOMATION: "true"
+  EXPECTED_AWS_ACCOUNT_ID: "035611741563"
+  PLAN_BUCKET: auto-shop-tfstate-035611741563-use1
+  PLAN_PREFIX: k8s-infra/staging/plans
   EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
   TF_VAR_cluster_endpoint_public_access_cidrs: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
 
 jobs:
-  destroy:
-    name: destroy
-    if: github.event_name == 'schedule' || inputs.confirm == 'destroy'
+  destroy-plan:
+    name: create destroy plan
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'plan'
     runs-on: ubuntu-latest
     environment: staging
-    timeout-minutes: 60
+    timeout-minutes: 13
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Reject a reused lifecycle dispatch ID
+        env:
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+          REQUESTED_SESSION_STARTED_AT: ${{ inputs.started_at }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/assert_unique_lifecycle_dispatch.py --workflow-file destroy.yml
+
+      - name: Require the matching authorized staging session
+        env:
+          REQUESTED_STACK: ${{ inputs.stack }}
+          REQUESTED_SCOPE: ${{ inputs.scope }}
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_STARTED_AT: ${{ inputs.started_at }}
+          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+          REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
+          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_SESSION_TOKEN" ]]; then
+            echo "::add-mask::$REQUESTED_SESSION_TOKEN"
+          fi
+          if [[ -n "$REQUESTED_LIFECYCLE_DISPATCH_ID" && ! "$REQUESTED_LIFECYCLE_DISPATCH_ID" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error::The lifecycle dispatch ID must be 32 lowercase hexadecimal characters."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Destroy plans require main."
+            exit 1
+          fi
+          if [[ "$REQUESTED_STACK" == "platform" && "$REQUESTED_SCOPE" != "all" ]]; then
+            echo "::error::The platform stack supports only scope=all."
+            exit 1
+          fi
+          if [[ "$REQUESTED_STACK" == "foundation" && "$REQUESTED_SCOPE" != "compute" ]]; then
+            echo "::error::Foundation teardown must use scope=compute to preserve the VPC and SSM contract."
+            exit 1
+          fi
+          case "$REQUESTED_STACK" in
+            foundation|platform) ;;
+            *) echo "::error::Unsupported Terraform stack."; exit 1 ;;
+          esac
+          python3 scripts/validate_staging_session.py \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --started-at "$REQUESTED_STARTED_AT" \
+            --mode "$REQUESTED_SESSION_MODE" \
+            --operation teardown \
+            --minimum-remaining-seconds 900
+
+      - name: Validate AWS region before requesting credentials
+        env:
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          if [[ "$REQUESTED_AWS_REGION" != "us-east-1" ]]; then
+            echo "::error::Staging destroy plans are restricted to us-east-1; received '$REQUESTED_AWS_REGION'."
+            exit 1
+          fi
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
@@ -42,40 +159,442 @@ jobs:
           terraform_wrapper: false
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        id: aws_credentials
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify AWS account and report destroy scope
+        env:
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+          STACK: ${{ inputs.stack }}
+        run: |
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          if [[ "$account_id" != "$EXPECTED_AWS_ACCOUNT_ID" ]]; then
+            echo "::error::Expected AWS account $EXPECTED_AWS_ACCOUNT_ID, received $account_id."
+            exit 1
+          fi
+          {
+            echo "### AWS destroy-plan scope"
+            echo "- Account: $account_id"
+            echo "- Region: $REQUESTED_AWS_REGION"
+            echo "- Environment: staging"
+            echo "- Stack: $STACK"
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Cost: Terraform plan does not estimate AWS cost; inspect the current billing view and budget before any destroy."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify private plan bucket controls
+        run: bash scripts/validate_plan_bucket.sh
+
+      - name: Require runner access before creating a platform destroy plan
+        if: inputs.stack == 'platform'
+        run: |
+          set +e
+          bash scripts/eks-endpoint-access.sh runner-allowed
+          runner_access_status=$?
+          set -e
+          if [[ "$runner_access_status" -eq 10 ]]; then
+            echo "::error::The Actions runner is outside the EKS administrator allowlist; no platform destroy plan was saved."
+            exit 1
+          fi
+          if [[ "$runner_access_status" -ne 0 ]]; then
+            exit "$runner_access_status"
+          fi
+
+      - name: Create and store one exact private destroy plan
+        env:
+          STACK: ${{ inputs.stack }}
+          SCOPE: ${{ inputs.scope }}
+          SESSION_ID: ${{ inputs.session_id }}
+          SESSION_STARTED_AT: ${{ inputs.started_at }}
+          SESSION_MODE: ${{ inputs.session_mode }}
+          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          umask 077
+          plan_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$plan_dir"' EXIT
+          plan_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          plan_file="$plan_dir/$STACK.tfplan"
+          plan_json="$plan_dir/plan.json"
+          manifest_file="$plan_dir/manifest.json"
+
+          if [[ "$STACK" == "foundation" ]]; then
+            platform_state_key="$(aws s3api list-objects-v2 \
+              --bucket "$PLAN_BUCKET" \
+              --prefix k8s-infra/staging/platform.tfstate \
+              --region "$REQUESTED_AWS_REGION" \
+              --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
+              --query "Contents[?Key == 'k8s-infra/staging/platform.tfstate'].Key | [0]" \
+              --output text)"
+            if [[ "$platform_state_key" != "None" ]]; then
+              terraform -chdir=envs/staging/platform init -input=false
+              platform_state="$(terraform -chdir=envs/staging/platform state list -lock=false)"
+              managed_platform_resources=()
+              while IFS= read -r address; do
+                [[ -n "$address" ]] || continue
+                case "$address" in
+                  data.*|*.data.*) ;;
+                  *) managed_platform_resources+=("$address") ;;
+                esac
+              done <<< "$platform_state"
+              if (( ${#managed_platform_resources[@]} > 0 )); then
+                echo "::error::Destroy the platform stack first; it still contains Terraform resources."
+                printf '%s\n' "${managed_platform_resources[@]}" >&2
+                exit 1
+              fi
+            fi
+          fi
+
+          terraform -chdir="envs/staging/$STACK" init -input=false
+          if [[ "$STACK" == "foundation" && "$SCOPE" == "compute" ]]; then
+            terraform -chdir="envs/staging/$STACK" plan \
+              -destroy \
+              -target=module.eks \
+              -target=module.alb \
+              -input=false \
+              -lock=false \
+              -no-color \
+              -out="$plan_file" >/dev/null
+            guard_policy="compute-destroy"
+          else
+            terraform -chdir="envs/staging/$STACK" plan \
+              -destroy \
+              -input=false \
+              -lock=false \
+              -no-color \
+              -out="$plan_file" >/dev/null
+            guard_policy="all-destroy"
+          fi
+          terraform -chdir="envs/staging/$STACK" show -json "$plan_file" > "$plan_json"
+          python3 scripts/terraform_plan_guard.py --plan-json "$plan_json" --policy "$guard_policy"
+          ./scripts/plan-summary.sh "$plan_file" "$STACK" >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/validate_staging_session.py \
+            --session-id "$SESSION_ID" \
+            --started-at "$SESSION_STARTED_AT" \
+            --mode "$SESSION_MODE" \
+            --operation teardown \
+            --minimum-remaining-seconds 720
+
+          python3 scripts/terraform_plan_artifact.py create-manifest \
+            --plan-id "$plan_id" \
+            --purpose destroy \
+            --aws-account-id "$EXPECTED_AWS_ACCOUNT_ID" \
+            --aws-region "$REQUESTED_AWS_REGION" \
+            --commit-sha "$GITHUB_SHA" \
+            --session-id "$SESSION_ID" \
+            --session-started-at "$SESSION_STARTED_AT" \
+            --session-mode "$SESSION_MODE" \
+            --scope "$SCOPE" \
+            --terraform-version "$TF_VERSION" \
+            --output "$manifest_file" \
+            --plan "$STACK=$plan_file"
+
+          attestation_dir="$RUNNER_TEMP/k8s-plan-attestation"
+          mkdir -p "$attestation_dir"
+          chmod 700 "$attestation_dir"
+          python3 scripts/terraform_plan_artifact.py create-attestation \
+            --manifest "$manifest_file" \
+            --output "$attestation_dir/manifest.sha256"
+
+          python3 scripts/validate_staging_session.py \
+            --session-id "$SESSION_ID" \
+            --started-at "$SESSION_STARTED_AT" \
+            --mode "$SESSION_MODE" \
+            --operation teardown \
+            --minimum-remaining-seconds 720
+
+          plan_base_key="$PLAN_PREFIX/$plan_id/destroy"
+          aws s3api put-object \
+            --bucket "$PLAN_BUCKET" \
+            --key "$plan_base_key/manifest.json" \
+            --body "$manifest_file" \
+            --region "$REQUESTED_AWS_REGION" \
+            --server-side-encryption AES256 \
+            --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
+            --no-cli-pager >/dev/null
+          aws s3api put-object \
+            --bucket "$PLAN_BUCKET" \
+            --key "$plan_base_key/$STACK.tfplan" \
+            --body "$plan_file" \
+            --region "$REQUESTED_AWS_REGION" \
+            --server-side-encryption AES256 \
+            --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
+            --no-cli-pager >/dev/null
+
+          {
+            echo "### Destroy plan ready for review"
+            echo "- Plan ID: $plan_id"
+            echo "- Stack: $STACK"
+            echo "- Scope: $SCOPE"
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Private object prefix: s3://$PLAN_BUCKET/$plan_base_key/"
+            echo "- Destroy platform first. Foundation scope=compute removes only module.eks and module.alb and preserves the VPC, subnets, and SSM contract."
+            echo "- Review every resource/action and the current cost/budget before dispatching operation=destroy with confirm=destroy."
+            echo "- A successful destroy removes the exact plan and manifest objects. Unconsumed plans remain private in S3 until lifecycle cleanup or an authorized cleanup."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Store the exact manifest digest with the originating workflow run
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: k8s-plan-attestation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/k8s-plan-attestation/manifest.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  destroy-apply:
+    name: destroy reviewed saved plan
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'destroy'
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 13
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reject a reused lifecycle dispatch ID
+        env:
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+          REQUESTED_SESSION_STARTED_AT: ${{ inputs.started_at }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/assert_unique_lifecycle_dispatch.py --workflow-file destroy.yml
+
+      - id: validate-session
+        name: Require the matching session, plan ID, and destruction confirmation
+        env:
+          REQUESTED_STACK: ${{ inputs.stack }}
+          REQUESTED_SCOPE: ${{ inputs.scope }}
+          REQUESTED_PLAN_ID: ${{ inputs.plan_id }}
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_STARTED_AT: ${{ inputs.started_at }}
+          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+          REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
+          CONFIRM: ${{ inputs.confirm }}
+          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_SESSION_TOKEN" ]]; then
+            echo "::add-mask::$REQUESTED_SESSION_TOKEN"
+          fi
+          if [[ -n "$REQUESTED_LIFECYCLE_DISPATCH_ID" && ! "$REQUESTED_LIFECYCLE_DISPATCH_ID" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error::The lifecycle dispatch ID must be 32 lowercase hexadecimal characters."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Destroy requires main."
+            exit 1
+          fi
+          if [[ "$REQUESTED_STACK" == "platform" && "$REQUESTED_SCOPE" != "all" ]]; then
+            echo "::error::The platform stack supports only scope=all."
+            exit 1
+          fi
+          if [[ "$REQUESTED_STACK" == "foundation" && "$REQUESTED_SCOPE" != "compute" ]]; then
+            echo "::error::Foundation teardown must use scope=compute to preserve the VPC and SSM contract."
+            exit 1
+          fi
+          if [[ "$CONFIRM" != "destroy" ]]; then
+            echo "::error::Type destroy only after reviewing the exact destroy plan and current cost/budget."
+            exit 1
+          fi
+          if [[ ! "$REQUESTED_PLAN_ID" =~ ^[0-9]+-[0-9]+$ ]]; then
+            echo "::error::The plan ID must be a GitHub run ID and attempt, formatted as digits-digits."
+            exit 1
+          fi
+          case "$REQUESTED_STACK" in
+            foundation|platform) ;;
+            *) echo "::error::Unsupported Terraform stack."; exit 1 ;;
+          esac
+          python3 scripts/validate_staging_session.py \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --started-at "$REQUESTED_STARTED_AT" \
+            --mode "$REQUESTED_SESSION_MODE" \
+            --operation teardown \
+            --minimum-remaining-seconds 900
+          plan_run_id="${REQUESTED_PLAN_ID%%-*}"
+          echo "plan_run_id=$plan_run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the originating destroy-plan workflow run
+        env:
+          PLAN_ID: ${{ inputs.plan_id }}
+          EXPECTED_COMMIT_SHA: ${{ github.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/verify_plan_run.py --plan-id "$PLAN_ID" --purpose destroy --expected-commit-sha "$EXPECTED_COMMIT_SHA"
+
+      - name: Download the exact saved-plan manifest attestation
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: k8s-plan-attestation-${{ inputs.plan_id }}
+          path: ${{ runner.temp }}/k8s-plan-attestation
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.validate-session.outputs.plan_run_id }}
+
+      - name: Validate AWS region before requesting credentials
+        env:
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          if [[ "$REQUESTED_AWS_REGION" != "us-east-1" ]]; then
+            echo "::error::Staging destroy is restricted to us-east-1; received '$REQUESTED_AWS_REGION'."
+            exit 1
+          fi
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-duration-seconds: 3600
 
-      - name: Destroy platform (only while the cluster exists)
+      - name: Verify AWS account and report destroy scope
+        env:
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+          STACK: ${{ inputs.stack }}
+          PLAN_ID: ${{ inputs.plan_id }}
         run: |
-          set +e
-          describe_err="$(aws eks describe-cluster --name auto-shop-staging 2>&1 >/dev/null)"
-          describe_rc=$?
-          set -e
-          if [ "$describe_rc" -eq 0 ]; then
-            bash scripts/eks-endpoint-access.sh add-runner
-            terraform -chdir=envs/staging/platform init -input=false
-            terraform -chdir=envs/staging/platform destroy -input=false -auto-approve -lock-timeout=300s > /dev/null
-            echo "platform destroyed" >> "$GITHUB_STEP_SUMMARY"
-          elif echo "$describe_err" | grep -q "ResourceNotFoundException"; then
-            echo "platform: cluster not running, nothing to destroy" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "describe-cluster failed for a reason other than 'cluster does not exist':" >&2
-            echo "$describe_err" >&2
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          if [[ "$account_id" != "$EXPECTED_AWS_ACCOUNT_ID" ]]; then
+            echo "::error::Expected AWS account $EXPECTED_AWS_ACCOUNT_ID, received $account_id."
             exit 1
           fi
+          {
+            echo "### AWS destroy scope"
+            echo "- Account: $account_id"
+            echo "- Region: $REQUESTED_AWS_REGION"
+            echo "- Environment: staging"
+            echo "- Stack: $STACK"
+            echo "- Plan ID: $PLAN_ID"
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Cost: Terraform plan does not estimate AWS cost; confirmation was entered after checking the current budget and billing view."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Restore the administrator-only EKS endpoint allowlist
-        if: ${{ always() && steps.aws_credentials.outcome == 'success' }}
-        run: bash scripts/eks-endpoint-access.sh restore-admin
+      - name: Verify private plan bucket controls
+        run: bash scripts/validate_plan_bucket.sh
 
-      - name: Destroy foundation
+      - name: Require the runner to be in the EKS administrator allowlist
+        if: inputs.stack == 'platform'
         run: |
-          terraform -chdir=envs/staging/foundation init -input=false
-          terraform -chdir=envs/staging/foundation destroy -input=false -auto-approve -lock-timeout=300s > /dev/null
-          echo "foundation destroyed" >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          bash scripts/eks-endpoint-access.sh runner-allowed
+          runner_access_status=$?
+          set -e
+          if [[ "$runner_access_status" -eq 10 ]]; then
+            echo "::error::The Actions runner is outside the EKS administrator allowlist; no platform destroy was started."
+            exit 1
+          fi
+          if [[ "$runner_access_status" -ne 0 ]]; then
+            exit "$runner_access_status"
+          fi
 
-      - name: Orphan check
-        run: ./scripts/orphans.sh | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Verify and destroy the exact saved plan
+        env:
+          STACK: ${{ inputs.stack }}
+          SCOPE: ${{ inputs.scope }}
+          PLAN_ID: ${{ inputs.plan_id }}
+          SESSION_ID: ${{ inputs.session_id }}
+          SESSION_STARTED_AT: ${{ inputs.started_at }}
+          SESSION_MODE: ${{ inputs.session_mode }}
+          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          umask 077
+          plan_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$plan_dir"' EXIT
+          plan_file="$plan_dir/$STACK.tfplan"
+          plan_json="$plan_dir/plan.json"
+          manifest_file="$plan_dir/manifest.json"
+          plan_key="$PLAN_PREFIX/$PLAN_ID/destroy/$STACK.tfplan"
+          manifest_key="$PLAN_PREFIX/$PLAN_ID/destroy/manifest.json"
+
+          aws s3 cp "s3://$PLAN_BUCKET/$plan_key" "$plan_file" \
+            --region "$REQUESTED_AWS_REGION" \
+            --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
+            --only-show-errors
+          aws s3 cp "s3://$PLAN_BUCKET/$manifest_key" "$manifest_file" \
+            --region "$REQUESTED_AWS_REGION" \
+            --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
+            --only-show-errors
+          python3 scripts/terraform_plan_artifact.py verify-attestation \
+            --manifest "$manifest_file" \
+            --attestation "$RUNNER_TEMP/k8s-plan-attestation/manifest.sha256"
+          python3 scripts/terraform_plan_artifact.py verify \
+            --manifest "$manifest_file" \
+            --plan-file "$plan_file" \
+            --plan-id "$PLAN_ID" \
+            --purpose destroy \
+            --aws-account-id "$EXPECTED_AWS_ACCOUNT_ID" \
+            --aws-region "$REQUESTED_AWS_REGION" \
+            --stack "$STACK" \
+            --commit-sha "$GITHUB_SHA" \
+            --session-id "$SESSION_ID" \
+            --session-started-at "$SESSION_STARTED_AT" \
+            --session-mode "$SESSION_MODE" \
+            --scope "$SCOPE" \
+            --terraform-version "$TF_VERSION"
+
+          if [[ "$STACK" == "foundation" ]]; then
+            platform_state_key="$(aws s3api list-objects-v2 \
+              --bucket "$PLAN_BUCKET" \
+              --prefix k8s-infra/staging/platform.tfstate \
+              --region "$REQUESTED_AWS_REGION" \
+              --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
+              --query "Contents[?Key == 'k8s-infra/staging/platform.tfstate'].Key | [0]" \
+              --output text)"
+            if [[ "$platform_state_key" != "None" ]]; then
+              terraform -chdir=envs/staging/platform init -input=false
+              platform_state="$(terraform -chdir=envs/staging/platform state list)"
+              managed_platform_resources=()
+              while IFS= read -r address; do
+                [[ -n "$address" ]] || continue
+                case "$address" in
+                  data.*|*.data.*) ;;
+                  *) managed_platform_resources+=("$address") ;;
+                esac
+              done <<< "$platform_state"
+              if (( ${#managed_platform_resources[@]} > 0 )); then
+                echo "::error::Destroy the platform stack first; it still contains Terraform resources."
+                printf '%s\n' "${managed_platform_resources[@]}" >&2
+                exit 1
+              fi
+            fi
+          fi
+
+          terraform -chdir="envs/staging/$STACK" init -input=false
+          terraform -chdir="envs/staging/$STACK" show -json "$plan_file" > "$plan_json"
+          if [[ "$STACK" == "foundation" && "$SCOPE" == "compute" ]]; then
+            guard_policy="compute-destroy"
+          else
+            guard_policy="all-destroy"
+          fi
+          python3 scripts/terraform_plan_guard.py --plan-json "$plan_json" --policy "$guard_policy"
+          python3 scripts/validate_staging_session.py \
+            --session-id "$SESSION_ID" \
+            --started-at "$SESSION_STARTED_AT" \
+            --mode "$SESSION_MODE" \
+            --operation teardown \
+            --minimum-remaining-seconds 720
+          terraform -chdir="envs/staging/$STACK" apply \
+            -input=false \
+            -lock-timeout=300s \
+            "$plan_file" >/dev/null
+          echo "$STACK destroyed from saved plan $PLAN_ID." >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/delete-plan-artifact.sh "$PLAN_ID" destroy "$STACK"
+
+\n

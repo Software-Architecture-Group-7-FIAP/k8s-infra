@@ -43,10 +43,10 @@ resource "aws_ecr_lifecycle_policy" "auto_shop_system" {
       },
       {
         rulePriority = 2
-        description  = "Keep the ten most recent main images"
+        description  = "Keep the ten most recent commit-tagged images"
         selection = {
           tagStatus     = "tagged"
-          tagPrefixList = ["main-"]
+          tagPrefixList = ["sha-"]
           countType     = "imageCountMoreThan"
           countNumber   = 10
         }

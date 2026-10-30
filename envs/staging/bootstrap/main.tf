@@ -13,19 +13,19 @@ resource "aws_iam_openid_connect_provider" "github" {
   client_id_list = ["sts.amazonaws.com"]
 }
 
-# Read-only role for terraform plan in pull requests. Scoped to this repository's own pull_request
-# and main-branch events via `sub`, with the org/repo-id segments wildcarded: GitHub appends
-# immutable numeric IDs to `sub` for this org (repo:ORG@id/REPO@id:...), so a StringEquals on the
-# old ID-less format silently never matches. The wildcards sit mid-string, not leading, so they
-# still pass AWS's "Trust policy ... must evaluate ... not scoped to all" validation.
+# Read-only role for coordinator-authorized terraform plans from main-branch jobs and explicitly listed
+# protected GitHub Environments. Scoped via `sub`, with the org/repo-id segments wildcarded: GitHub
+# appends immutable numeric IDs to `sub` for this org (repo:ORG@id/REPO@id:...), so a StringEquals
+# on the old ID-less format silently never matches. The wildcards sit mid-string, not leading, so
+# they still pass AWS's "Trust policy ... must evaluate ... not scoped to all" validation.
 #
 # `sub` is the ONLY condition here, by design, not by omission: this account's STS only honors `aud`
 # and `sub` as AssumeRoleWithWebIdentity condition context for this OIDC provider. The GitHub-issued
 # token also contains `repository` and `event_name`, but STS does not match them as condition keys.
 # Requiring either makes the role permanently unassumable; this was confirmed empirically on
 # 2026-10-26 (see var.repositories for the account-specific details).
-# PR content is semi-trusted (it gets ReadOnlyAccess), so the attached policy below denies the
-# data-plane reads it does not need.
+# Pull requests are deliberately excluded. A plan role can only be assumed by main-branch and
+# protected-Environment workflows after they validate the signed lifecycle capability.
 data "aws_iam_policy_document" "plan_trust" {
   for_each = var.repositories
 
@@ -46,10 +46,13 @@ data "aws_iam_policy_document" "plan_trust" {
     condition {
       test     = "StringLike"
       variable = "${local.oidc_host}:sub"
-      values = [
-        "repo:${var.github_org}@*/${each.key}@*:pull_request",
-        "repo:${var.github_org}@*/${each.key}@*:ref:refs/heads/main",
-      ]
+      values = concat(
+        ["repo:${var.github_org}@*/${each.key}@*:ref:refs/heads/main"],
+        [
+          for env in lookup(var.plan_environments, each.key, []) :
+          "repo:${var.github_org}@*/${each.key}@*:environment:${env}"
+        ]
+      )
     }
   }
 }
@@ -85,6 +88,95 @@ data "aws_iam_policy_document" "deploy_trust" {
       ]
     }
   }
+}
+
+# Read-only identity for the coordinator-triggered staging orphan audit. It trusts only this
+# repository's protected staging Environment; the Environment's deployment-branch policy limits
+# the job to main, as enforced for the deploy role.
+data "aws_iam_policy_document" "orphan_audit_trust" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_host}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "${local.oidc_host}:sub"
+      values   = ["repo:${var.github_org}@*/k8s-infra@*:environment:staging"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "orphan_audit" {
+  statement {
+    sid = "ListAndDescribeSessionResources"
+    actions = [
+      "ec2:DescribeAddresses",
+      "ec2:DescribeInstances",
+      "ec2:DescribeNatGateways",
+      "ec2:DescribeNetworkInterfaces",
+      "ec2:DescribeSecurityGroups",
+      "ec2:DescribeVolumes",
+      "eks:ListClusters",
+      "elasticloadbalancing:DescribeLoadBalancers",
+      "elasticloadbalancing:DescribeTargetGroups",
+      "logs:DescribeLogGroups",
+      "rds:DescribeDBClusterSnapshots",
+      "rds:DescribeDBClusters",
+      "rds:DescribeDBInstances",
+      "rds:DescribeDBProxies",
+      "rds:DescribeDBSnapshots",
+      "sts:GetCallerIdentity",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "ListOnlyLifecycleStateKeys"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:prefix"
+      values = [
+        "k8s-infra/staging/foundation.tfstate",
+        "k8s-infra/staging/platform.tfstate",
+      ]
+    }
+  }
+
+  statement {
+    sid     = "ReadOnlyLifecycleStateObjects"
+    actions = ["s3:GetObject"]
+    resources = [
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/foundation.tfstate",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/platform.tfstate",
+    ]
+  }
+}
+
+resource "aws_iam_role" "orphan_audit" {
+  name                 = "gh-audit-k8s-infra"
+  path                 = var.iam_path
+  description          = "Read-only AWS and Terraform state inventory for k8s-infra staging teardown."
+  assume_role_policy   = data.aws_iam_policy_document.orphan_audit_trust.json
+  max_session_duration = 3600
+}
+
+resource "aws_iam_role_policy" "orphan_audit" {
+  name   = "orphan-audit-k8s-infra-read-only"
+  role   = aws_iam_role.orphan_audit.name
+  policy = data.aws_iam_policy_document.orphan_audit.json
 }
 
 # State access is limited to the repository's own key prefix (state + native lock file).
@@ -135,15 +227,31 @@ data "aws_iam_policy_document" "state" {
     ]
   }
 
-  # Allow-list for the bucket itself: only the read actions needed to list/locate objects.
-  # Everything else (ACLs, policy, versioning, lifecycle, encryption, replication, logging, notifications,
-  # public access block, ownership controls, bucket deletion) is denied, including actions not yet
-  # invented when this was written.
+  # Bucket metadata is read-only: CI can inspect location, versioning, encryption, public-access
+  # block, and ownership controls. Every bucket mutation (ACLs, policy, lifecycle, replication,
+  # logging, notifications, public-access block, ownership controls, deletion) remains denied.
   statement {
-    sid         = "DenyStateBucketAdministration"
-    effect      = "Deny"
-    not_actions = ["s3:ListBucket", "s3:GetBucketLocation", "s3:GetBucketVersioning", "s3:GetEncryptionConfiguration"]
-    resources   = ["arn:${local.partition}:s3:::${var.state_bucket}"]
+    sid    = "DenyStateBucketAdministration"
+    effect = "Deny"
+    not_actions = [
+      "s3:ListBucket",
+      "s3:GetBucketLocation",
+      "s3:GetBucketVersioning",
+      "s3:GetEncryptionConfiguration",
+      "s3:GetBucketPublicAccessBlock",
+      "s3:GetBucketOwnershipControls",
+    ]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}"]
+  }
+
+  statement {
+    sid = "ReadStateBucketPrivacyControls"
+    actions = [
+      "s3:GetBucketLocation",
+      "s3:GetBucketPublicAccessBlock",
+      "s3:GetBucketOwnershipControls",
+    ]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}"]
   }
 }
 
@@ -161,7 +269,7 @@ resource "aws_iam_role" "plan" {
 
   name                 = "gh-plan-${each.key}"
   path                 = var.iam_path
-  description          = "Read-only role for terraform plan in ${each.key} pull requests."
+  description          = "Read-only role for terraform plans in ${each.key} authorized workflows."
   assume_role_policy   = data.aws_iam_policy_document.plan_trust[each.key].json
   max_session_duration = 3600
 }
@@ -177,11 +285,144 @@ resource "aws_iam_role_policy_attachment" "plan_state" {
   for_each = var.repositories
 
   role       = aws_iam_role.plan[each.key].name
-  policy_arn = aws_iam_policy.state[each.key].arn
+  policy_arn = aws_iam_policy.plan_state[each.key].arn
 }
 
-# PR content is semi-trusted: it runs terraform init/plan with this role's credentials. ReadOnlyAccess
-# is still account-wide data-plane read, so explicitly deny the categories a plan never needs.
+resource "aws_iam_role_policy_attachment" "plan_artifacts" {
+  for_each = aws_iam_policy.plan_artifacts
+
+  role       = aws_iam_role.plan[each.key].name
+  policy_arn = each.value.arn
+}
+
+data "aws_iam_policy_document" "plan_state" {
+  for_each = var.repositories
+
+  statement {
+    sid       = "ListOnlyExactStateKeys"
+    actions   = ["s3:ListBucket", "s3:ListBucketVersions"]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:prefix"
+      values   = lookup(var.plan_state_keys, each.key, [])
+    }
+  }
+
+  statement {
+    sid       = "DenyListingOutsideExactStateKeys"
+    effect    = "Deny"
+    actions   = ["s3:ListBucket", "s3:ListBucketVersions"]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}"]
+
+    condition {
+      test     = "StringNotEquals"
+      variable = "s3:prefix"
+      values   = lookup(var.plan_state_keys, each.key, [])
+    }
+  }
+
+  statement {
+    sid     = "DenyListingOtherBuckets"
+    effect  = "Deny"
+    actions = ["s3:ListBucket", "s3:ListBucketVersions"]
+    not_resources = [
+      "arn:${local.partition}:s3:::${var.state_bucket}",
+    ]
+  }
+
+  statement {
+    sid     = "DenyObjectReadsOutsideExactStateKeys"
+    effect  = "Deny"
+    actions = ["s3:GetObject*"]
+    not_resources = [
+      for key in lookup(var.plan_state_keys, each.key, []) :
+      "arn:${local.partition}:s3:::${var.state_bucket}/${key}"
+    ]
+  }
+
+  statement {
+    sid       = "DenyBucketEnumeration"
+    effect    = "Deny"
+    actions   = ["s3:ListAllMyBuckets"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "DenyS3WritesOutsidePlanArtifacts"
+    effect = "Deny"
+    actions = [
+      "s3:PutObject*", "s3:DeleteObject*", "s3:CreateMultipartUpload",
+      "s3:UploadPart", "s3:CompleteMultipartUpload", "s3:AbortMultipartUpload",
+    ]
+    not_resources = length(lookup(var.plan_artifact_prefixes, each.key, [])) > 0 ? [
+      for prefix in lookup(var.plan_artifact_prefixes, each.key, []) :
+      "arn:${local.partition}:s3:::${var.state_bucket}/${prefix}"
+      ] : [
+      "arn:${local.partition}:s3:::${var.state_bucket}/_no_plan_uploads_configured/*",
+    ]
+  }
+
+  statement {
+    sid       = "DenyPlanArtifactDeletion"
+    effect    = "Deny"
+    actions   = ["s3:DeleteObject*"]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}/*"]
+  }
+
+  statement {
+    sid    = "DenyStateBucketAdministration"
+    effect = "Deny"
+    not_actions = [
+      "s3:ListBucket", "s3:GetBucketLocation", "s3:GetBucketVersioning",
+      "s3:GetEncryptionConfiguration", "s3:GetBucketPublicAccessBlock",
+      "s3:GetBucketOwnershipControls",
+    ]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}"]
+  }
+}
+
+resource "aws_iam_policy" "plan_state" {
+  for_each = var.repositories
+
+  name        = "auto-shop-plan-state-${each.key}"
+  path        = var.iam_path
+  description = "Read-only exact Terraform state access for plan role ${each.key}; state writes are denied."
+  policy      = data.aws_iam_policy_document.plan_state[each.key].json
+}
+
+data "aws_iam_policy_document" "plan_artifacts" {
+  for_each = {
+    for repo, prefixes in var.plan_artifact_prefixes : repo => prefixes
+    if length(prefixes) > 0
+  }
+
+  statement {
+    sid     = "CreatePrivateSavedPlans"
+    actions = ["s3:PutObject"]
+    resources = [
+      for prefix in each.value : "arn:${local.partition}:s3:::${var.state_bucket}/${prefix}"
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-server-side-encryption"
+      values   = ["AES256"]
+    }
+  }
+}
+
+resource "aws_iam_policy" "plan_artifacts" {
+  for_each = data.aws_iam_policy_document.plan_artifacts
+
+  name        = "auto-shop-plan-artifacts-${each.key}"
+  path        = var.iam_path
+  description = "Allows saved-plan uploads only under explicitly configured plan prefixes for ${each.key}."
+  policy      = each.value.json
+}
+
+# ReadOnlyAccess is account-wide data-plane read, so explicitly deny the categories a plan never needs.
 # Secrets Manager and DynamoDB are denied everywhere (no stack reads them at plan time); SSM is
 # denied everywhere EXCEPT the project's own non-secret contract (.checkov.yaml CKV2_AWS_34), which
 # the platform stack legitimately reads at plan time (cluster name, VPC ID/CIDR, RDS subnet CIDRs).
@@ -214,7 +455,7 @@ data "aws_iam_policy_document" "plan_restrictions" {
 resource "aws_iam_policy" "plan_restrictions" {
   name        = "auto-shop-plan-restrictions"
   path        = var.iam_path
-  description = "Denies sensitive data-plane reads for PR-triggered plan roles (ReadOnlyAccess is otherwise account-wide)."
+  description = "Denies sensitive data-plane reads for repository-scoped plan roles (ReadOnlyAccess is otherwise account-wide)."
   policy      = data.aws_iam_policy_document.plan_restrictions.json
 }
 
@@ -310,6 +551,15 @@ resource "aws_iam_policy" "project_boundary" {
 }
 
 data "aws_iam_policy_document" "deploy_iam" {
+  # PowerUserAccess grants role chaining. This identity-policy Deny applies to deploy roles without
+  # preventing their initial AssumeRoleWithWebIdentity exchange with GitHub OIDC.
+  statement {
+    sid       = "DenyRoleChaining"
+    effect    = "Deny"
+    actions   = ["sts:AssumeRole"]
+    resources = ["*"]
+  }
+
   # CreateRole is the escalation vector: the iam:PermissionsBoundary condition key only exists in the
   # request context for CreateRole/PutRolePermissionsBoundary, so it must stand alone. Every role
   # created under the project path is forced to carry the boundary from birth; IAM caps its effective
