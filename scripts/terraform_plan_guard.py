@@ -18,6 +18,55 @@ NAT_ONLY_ADDRESS = re.compile(
     r"^module\.network\.module\.vpc\.aws_(?:nat_gateway\.this|eip\.nat|route\.private_nat_gateway)(?:\[|$)"
 )
 COMPUTE_MODULES = ("module.eks.", "module.alb.")
+LEGACY_ALB_INGRESS_DELETIONS = {
+    'module.alb.aws_vpc_security_group_ingress_rule.alb_listener["hml"]': {
+        "id": "sgr-00f836f67420b89b1",
+        "security_group_id": "sg-0dc57c6822fb9678a",
+        "description": "hml listener from inside the VPC",
+        "ip_protocol": "tcp",
+        "from_port": 8001,
+        "to_port": 8001,
+        "cidr_ipv4": "10.80.0.0/20",
+    },
+    'module.alb.aws_vpc_security_group_ingress_rule.alb_listener["prd"]': {
+        "id": "sgr-0a86dc85878bd33c9",
+        "security_group_id": "sg-0dc57c6822fb9678a",
+        "description": "prd listener from inside the VPC",
+        "ip_protocol": "tcp",
+        "from_port": 8002,
+        "to_port": 8002,
+        "cidr_ipv4": "10.80.0.0/20",
+    },
+}
+
+
+def _is_exact_legacy_alb_ingress_delete(
+    change: dict[str, object], address: str, actions: tuple[str, ...]
+) -> bool:
+    """Allow only the two verified stale VPC-wide ALB rules to be removed."""
+    expected = LEGACY_ALB_INGRESS_DELETIONS.get(address)
+    detail = change.get("change")
+    before = detail.get("before") if isinstance(detail, dict) else None
+    if (
+        actions != ("delete",)
+        or change.get("mode", "managed") != "managed"
+        or expected is None
+        or not isinstance(before, dict)
+    ):
+        return False
+
+    if any(before.get(field) != value for field, value in expected.items()):
+        return False
+
+    # A rule with another populated source selector is outside this one-time cleanup.
+    alternate_source_fields = (
+        "cidr_ipv6",
+        "prefix_list_id",
+        "referenced_security_group_id",
+    )
+    if any(before.get(field) not in (None, "") for field in alternate_source_fields):
+        return False
+    return before.get("self") in (None, False)
 
 
 def _read_resource_changes(path: Path) -> list[dict[str, object]]:
@@ -65,7 +114,9 @@ def validate_plan(changes: list[dict[str, object]], policy: str) -> None:
         changed_count += 1
 
         if policy == "open":
-            if "delete" in actions:
+            if "delete" in actions and not _is_exact_legacy_alb_ingress_delete(
+                change, str(address), actions
+            ):
                 violations.append(f"{address}: opening plans cannot delete or replace resources")
             continue
 
