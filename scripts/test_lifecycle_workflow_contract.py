@@ -178,7 +178,12 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
         )[0]
         self.assertIn('"iam:CreateRole"', lambda_hml_deploy_policy)
         self.assertIn('variable = "iam:PermissionsBoundary"', lambda_hml_deploy_policy)
-        self.assertIn("aws_iam_policy.project_boundary.arn", lambda_hml_deploy_policy)
+        expected_boundary_arn = 'arn:${local.partition}:iam::${local.account_id}:policy${var.iam_path}auto-shop-boundary'
+        self.assertIn(expected_boundary_arn, lambda_hml_deploy_policy)
+        deploy_iam_policy = bootstrap.split(
+            'data "aws_iam_policy_document" "deploy_iam" {', maxsplit=1
+        )[1].split('resource "aws_iam_policy" "deploy_iam"', maxsplit=1)[0]
+        self.assertIn(expected_boundary_arn, deploy_iam_policy)
         self.assertIn('variable = "iam:PassedToService"', lambda_hml_deploy_policy)
         create_role_statement = lambda_hml_deploy_policy.split(
             'sid       = "CreateBoundedLambdaExecutionRole"', maxsplit=1
@@ -195,6 +200,17 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
             pass_role_statement,
         )
         self.assertIn('values   = ["lambda.amazonaws.com"]', pass_role_statement)
+        role_management_statement = lambda_hml_deploy_policy.split(
+            'sid = "ManageLambdaExecutionRole"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        for forbidden_action in (
+            '"iam:AttachRolePolicy"',
+            '"iam:DeleteRole"',
+            '"iam:DeleteRolePolicy"',
+            '"iam:DetachRolePolicy"',
+            '"iam:ListInstanceProfilesForRole"',
+        ):
+            self.assertNotIn(forbidden_action, role_management_statement)
         self.assertIn("alias/auto-shop/hml/lambda-auth/jwt-signing", lambda_hml_deploy_policy)
         self.assertIn('variable = "kms:ResourceAliases"', lambda_hml_deploy_policy)
         self.assertIn(
@@ -205,6 +221,12 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
             'sid = "ManageOnlyLambdaAuthHmlFunction"', maxsplit=1
         )[1].split("\n  }", maxsplit=1)[0]
         self.assertIn("function:lambda-auth-hml", lambda_function_statement)
+        self.assertIn('"lambda:GetFunction"', lambda_function_statement)
+        self.assertIn('"lambda:GetFunctionConfiguration"', lambda_function_statement)
+        self.assertIn('"lambda:UpdateFunctionCode"', lambda_function_statement)
+        self.assertIn('"lambda:UpdateFunctionConfiguration"', lambda_function_statement)
+        self.assertNotIn('"lambda:GetFunctionConcurrency"', lambda_function_statement)
+        self.assertNotIn('"lambda:PutFunctionConcurrency"', lambda_function_statement)
         self.assertNotIn('resources = ["*"]', lambda_function_statement)
 
         lambda_hml_deploy_policy_attachment = bootstrap.split(
