@@ -20,6 +20,16 @@ EXPECTED_WORKFLOWS = {
     "apply": ".github/workflows/ci.yml",
     "destroy": ".github/workflows/destroy.yml",
 }
+ALLOWED_WORKFLOW_PATHS = {
+    "apply": {
+        ".github/workflows/ci.yml",
+        ".github/workflows/cluster-ci.yml",
+    },
+    "destroy": {
+        ".github/workflows/destroy.yml",
+        ".github/workflows/cluster-destroy.yml",
+    },
+}
 
 
 class PlanRunError(ValueError):
@@ -77,10 +87,14 @@ def verify_workflow_run(
     attempt: str,
     purpose: str,
     expected_commit_sha: str,
+    expected_workflow_path: str | None = None,
 ) -> None:
-    expected_workflow = EXPECTED_WORKFLOWS.get(purpose)
-    if expected_workflow is None:
+    default_workflow = EXPECTED_WORKFLOWS.get(purpose)
+    if default_workflow is None:
         raise PlanRunError("The plan purpose must be apply or destroy.")
+    expected_workflow = expected_workflow_path or default_workflow
+    if expected_workflow not in ALLOWED_WORKFLOW_PATHS[purpose]:
+        raise PlanRunError("The expected plan workflow path is not allowed for this purpose.")
     if not COMMIT_PATTERN.fullmatch(expected_commit_sha):
         raise PlanRunError("The expected commit must be a lowercase Git commit SHA.")
 
@@ -134,6 +148,7 @@ def check_plan_run(arguments: argparse.Namespace) -> int:
         attempt=match.group("attempt"),
         purpose=arguments.purpose,
         expected_commit_sha=arguments.expected_commit_sha,
+        expected_workflow_path=arguments.expected_workflow_path,
     )
     print(f"Verified the successful {arguments.purpose} plan run for {arguments.plan_id}.")
     return 0
@@ -143,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan-id", required=True)
     parser.add_argument("--purpose", choices=sorted(EXPECTED_WORKFLOWS), required=True)
+    parser.add_argument("--expected-workflow-path", choices=sorted({path for paths in ALLOWED_WORKFLOW_PATHS.values() for path in paths}))
     parser.add_argument("--expected-commit-sha", default=os.environ.get("GITHUB_SHA", ""))
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", ""))
     parser.add_argument("--api-url", default=os.environ.get("GITHUB_API_URL", "https://api.github.com"))

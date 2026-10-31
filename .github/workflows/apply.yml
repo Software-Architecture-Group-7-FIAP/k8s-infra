@@ -1,4 +1,5 @@
 name: Apply
+# HML/platform lifecycle applies run only in the isolated cluster-apply.yml CodeBuild workflow.
 run-name: ${{ inputs.session_id }}-${{ inputs.stack }}-${{ inputs.operation }}-apply:${{ inputs.lifecycle_dispatch_id || github.run_id }}
 
 # Applying infrastructure is always an explicit, reviewed workflow dispatch on main.
@@ -11,8 +12,6 @@ on:
         type: choice
         options:
           - foundation
-          - platform
-          - hml
       plan_id:
         description: Plan ID printed by the CI plan workflow
         required: true
@@ -71,6 +70,9 @@ env:
   PLAN_PREFIX: k8s-infra/staging/plans
   EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
   TF_VAR_cluster_endpoint_public_access_cidrs: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
+  TF_VAR_enable_private_eks_runner: ${{ vars.ENABLE_PRIVATE_EKS_RUNNER || 'false' }}
+  TF_VAR_github_runner_group_id: ${{ vars.GITHUB_RUNNER_GROUP_ID || '0' }}
+  TF_VAR_github_codeconnection_arn: ${{ vars.GITHUB_CODECONNECTION_ARN || '' }}
 
 jobs:
   apply:
@@ -87,6 +89,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Require persistent private-runner configuration for foundation
+        env:
+          REQUESTED_STACK: ${{ inputs.stack }}
+        run: python3 scripts/require_private_runner_configuration.py
 
       - name: Reject a reused lifecycle dispatch ID
         env:
@@ -133,7 +140,7 @@ jobs:
             exit 1
           fi
           case "$REQUESTED_STACK" in
-            foundation|platform|hml) ;;
+            foundation) ;;
             *) echo "::error::Unsupported Terraform stack."; exit 1 ;;
           esac
           case "$REQUESTED_OPERATION" in
@@ -370,7 +377,11 @@ jobs:
           terraform -chdir="$terraform_root" init -input=false
           terraform -chdir="$terraform_root" show -json "$plan_file" > "$plan_json"
           if [[ "$STACK" == "foundation" ]]; then
-            bash scripts/validate-eks-endpoint-plan.sh "$plan_json"
+            if [[ "$PLAN_SCOPE" == "nat-disable" ]]; then
+              bash scripts/validate-eks-endpoint-plan.sh "$plan_json" --allow-cluster-absent
+            else
+              bash scripts/validate-eks-endpoint-plan.sh "$plan_json"
+            fi
           fi
           python3 scripts/terraform_plan_guard.py --plan-json "$plan_json" --policy "$PLAN_SCOPE"
           session_operation="work"
@@ -391,10 +402,22 @@ jobs:
             "$plan_file" >/dev/null
 
           echo "$STACK applied from saved plan $PLAN_ID." >> "$GITHUB_STEP_SUMMARY"
-          bash scripts/delete-plan-artifact.sh "$PLAN_ID" apply "$STACK"
 
       - name: Smoke test
         if: inputs.stack == 'platform'
         run: ./scripts/smoke.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
-\n
+      - name: Verify the published foundation SSM contract
+        if: inputs.stack == 'foundation'
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          terraform -chdir=envs/staging/foundation output -json ssm_contract \
+            | python3 scripts/verify_ssm_contract.py
+
+      - name: Delete the saved-plan artifact after post-apply verification
+        env:
+          STACK: ${{ inputs.stack }}
+          PLAN_ID: ${{ inputs.plan_id }}
+        run: bash scripts/delete-plan-artifact.sh "$PLAN_ID" apply "$STACK"

@@ -1,0 +1,398 @@
+name: K8s HML Cluster Apply
+run-name: ${{ inputs.session_id }}-${{ inputs.stack }}-${{ inputs.operation }}-apply:${{ inputs.lifecycle_dispatch_id || github.run_id }}
+
+# Applying infrastructure is always an explicit, reviewed workflow dispatch on main.
+on:
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: Stack whose exact saved plan was reviewed
+        required: true
+        type: choice
+        options:
+          - hml
+          - platform
+      plan_id:
+        description: Plan ID printed by the CI plan workflow
+        required: true
+        type: string
+      session_id:
+        description: Same coordinator-provided session ID used when the exact plan was created
+        required: true
+        type: string
+      started_at:
+        description: Same UTC session start used when the exact plan was created
+        required: true
+        type: string
+      lifecycle_dispatch_id:
+        description: Coordinator correlation ID for this workflow dispatch
+        required: true
+        type: string
+      session_mode:
+        description: Authorized session window used when the plan was created
+        required: true
+        type: choice
+        options:
+          - hml
+          - prd-window
+      operation:
+        description: Exact plan scope created by CI
+        required: true
+        type: choice
+        options:
+          - open
+      enable_nat_gateway:
+        description: Must match the CI plan input; false is valid only for nat-disable
+        required: true
+        default: true
+        type: boolean
+      confirm:
+        description: Type apply only after reviewing account, region, resources, and current cost/budget
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: staging-infra
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: 1.15.8
+  TF_IN_AUTOMATION: "true"
+  EXPECTED_AWS_ACCOUNT_ID: "035611741563"
+  LIFECYCLE_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+  PLAN_BUCKET: auto-shop-tfstate-035611741563-use1
+  PLAN_PREFIX: k8s-infra/staging/plans
+  EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
+  TF_VAR_cluster_endpoint_public_access_cidrs: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
+
+jobs:
+  apply:
+    name: apply reviewed saved plan
+    if: github.ref == 'refs/heads/main'
+    runs-on:
+      group: k8s-private-eks
+      labels: codebuild-auto-shop-k8s-private-${{ github.run_id }}-${{ github.run_attempt }}
+    environment: staging
+    timeout-minutes: ${{ inputs.operation == 'nat-disable' && 13 || 60 }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reject a reused lifecycle dispatch ID
+        env:
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+          REQUESTED_SESSION_STARTED_AT: ${{ inputs.started_at }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/assert_unique_lifecycle_dispatch.py --workflow-file cluster-apply.yml
+
+      - id: validate-session
+        name: Require the matching authorized session and explicit confirmation
+        env:
+          REQUESTED_STACK: ${{ inputs.stack }}
+          REQUESTED_PLAN_ID: ${{ inputs.plan_id }}
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_STARTED_AT: ${{ inputs.started_at }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+          REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
+          REQUESTED_OPERATION: ${{ inputs.operation }}
+          ENABLE_NAT_GATEWAY: ${{ inputs.enable_nat_gateway }}
+          CONFIRM: ${{ inputs.confirm }}
+          STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
+          STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
+          AUTHORIZED_SESSION_MODE: ${{ vars.STAGING_SESSION_MODE }}
+          ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED || 'false' }}
+          PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY || 'false' }}
+          PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED || 'false' }}
+          K8S_HML_TERRAFORM_ROOT_READY: ${{ vars.K8S_HML_TERRAFORM_ROOT_READY || 'false' }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_LIFECYCLE_DISPATCH_ID" && ! "$REQUESTED_LIFECYCLE_DISPATCH_ID" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error::The lifecycle dispatch ID must be 32 lowercase hexadecimal characters."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Infrastructure apply is allowed only from main."
+            exit 1
+          fi
+          if [[ "$CONFIRM" != "apply" ]]; then
+            echo "::error::Type apply only after reviewing the saved plan and current cost/budget."
+            exit 1
+          fi
+          if [[ ! "$REQUESTED_PLAN_ID" =~ ^[0-9]+-[0-9]+$ ]]; then
+            echo "::error::The plan ID must be a GitHub run ID and attempt, formatted as digits-digits."
+            exit 1
+          fi
+          case "$REQUESTED_STACK" in
+            hml|platform) ;;
+            *) echo "::error::Unsupported Terraform stack."; exit 1 ;;
+          esac
+          case "$REQUESTED_OPERATION" in
+            open)
+              case "$REQUESTED_STACK" in
+                hml)
+                  if [[ "$K8S_HML_TERRAFORM_ROOT_READY" != "true" || "$REQUESTED_SESSION_MODE" != "hml" ]]; then
+                    echo "::error::The HML root is gated until its isolated state is reviewed and ready, and requires an HML session."
+                    exit 1
+                  fi
+                  ;;
+              esac
+              if [[ "$REQUESTED_SESSION_MODE" != "$AUTHORIZED_SESSION_MODE" ]]; then
+                echo "::error::The requested session mode does not match the protected Environment authorization."
+                exit 1
+              fi
+              if [[ "$REQUESTED_SESSION_MODE" == "prd-window" && \
+                ("$ENVIRONMENT_SCHEDULE_ENABLED" != "true" || \
+                "$PRD_LIFECYCLE_AUTOMATION_READY" != "true" || \
+                "$PRD_COST_EXCEPTION_APPROVED" != "true") ]]; then
+                echo "::error::PRD opening apply requires schedule, automation-readiness, and cost-exception gates."
+                exit 1
+              fi
+              if [[ "$ENABLE_NAT_GATEWAY" != "true" ]]; then
+                echo "::error::Opening plans must retain the NAT gateway."
+                exit 1
+              fi
+              ;;
+            nat-disable)
+              if [[ "$REQUESTED_STACK" != "foundation" || "$ENABLE_NAT_GATEWAY" != "false" ]]; then
+                echo "::error::NAT-only shutdown requires foundation and enable_nat_gateway=false."
+                exit 1
+              fi
+              ;;
+            *) echo "::error::Unsupported lifecycle operation."; exit 1 ;;
+          esac
+          session_operation="work"
+          minimum_remaining_seconds=3600
+          if [[ "$REQUESTED_OPERATION" == "nat-disable" ]]; then
+            session_operation="teardown"
+            minimum_remaining_seconds=900
+          fi
+          python3 scripts/validate_staging_session.py \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --started-at "$REQUESTED_STARTED_AT" \
+            --mode "$REQUESTED_SESSION_MODE" \
+            --operation "$session_operation" \
+            --minimum-remaining-seconds "$minimum_remaining_seconds"
+          plan_run_id="${REQUESTED_PLAN_ID%%-*}"
+          echo "plan_run_id=$plan_run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the originating plan workflow run
+        env:
+          PLAN_ID: ${{ inputs.plan_id }}
+          EXPECTED_COMMIT_SHA: ${{ github.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/verify_plan_run.py --plan-id "$PLAN_ID" --purpose apply --expected-commit-sha "$EXPECTED_COMMIT_SHA" --expected-workflow-path .github/workflows/cluster-ci.yml
+
+      - name: Download the exact saved-plan manifest attestation
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: k8s-plan-attestation-${{ inputs.plan_id }}
+          path: ${{ runner.temp }}/k8s-plan-attestation
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.validate-session.outputs.plan_run_id }}
+
+      - name: Validate AWS region before requesting credentials
+        env:
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          if [[ "$REQUESTED_AWS_REGION" != "us-east-1" ]]; then
+            echo "::error::Staging apply is restricted to us-east-1; received '$REQUESTED_AWS_REGION'."
+            exit 1
+          fi
+
+      - name: Require a trusted lifecycle actor before AWS credentials
+        env:
+          LIFECYCLE_TRUSTED_OPERATORS: ${{ vars.LIFECYCLE_TRUSTED_OPERATORS || '' }}
+        run: python3 scripts/require_trusted_lifecycle_operator.py
+
+      - name: Require the exact isolated HML deploy role before AWS credentials
+        if: inputs.stack == 'hml'
+        env:
+          HML_DEPLOY_ROLE_ARN: ${{ vars.AWS_HML_DEPLOY_ROLE_ARN || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$HML_DEPLOY_ROLE_ARN" != "arn:aws:iam::035611741563:role/auto-shop/gh-deploy-k8s-hml" ]]; then
+            echo "::error::AWS_HML_DEPLOY_ROLE_ARN must be configured to the dedicated HML-only role."
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        name: Assume the dedicated lifecycle authorization consumer role
+        with:
+          role-to-assume: arn:aws:iam::${{ env.EXPECTED_AWS_ACCOUNT_ID }}:role/auto-shop/auto-shop-staging-github-lifecycle-consumer-k8s-apply
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 900
+          role-session-name: lifecycle-consumer-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Consume the one-use apply dispatch authorization
+        env:
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/consume_lifecycle_dispatch.py \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
+            --workflow "K8s HML Cluster Apply"
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        name: Assume the namespace-scoped HML deploy role
+        if: inputs.stack == 'hml'
+        with:
+          role-to-assume: ${{ vars.AWS_HML_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 3600
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        name: Assume the shared staging deploy role
+        if: inputs.stack != 'hml'
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 3600
+
+      - name: Verify AWS account and report execution scope
+        env:
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+          STACK: ${{ inputs.stack }}
+          PLAN_ID: ${{ inputs.plan_id }}
+        run: |
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          if [[ "$account_id" != "$EXPECTED_AWS_ACCOUNT_ID" ]]; then
+            echo "::error::Expected AWS account $EXPECTED_AWS_ACCOUNT_ID, received $account_id."
+            exit 1
+          fi
+          {
+            echo "### Apply scope"
+            echo "- Account: $account_id"
+            echo "- Region: $REQUESTED_AWS_REGION"
+            echo "- Environment: staging"
+            echo "- Stack: $STACK"
+            echo "- Plan ID: $PLAN_ID"
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Cost: Terraform plan does not estimate AWS cost; confirmation was entered after checking the current budget and billing view."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify private plan bucket controls
+        run: bash scripts/validate_plan_bucket.sh
+
+      - name: Preflight bootstrap boundary
+        if: inputs.stack != 'hml'
+        run: |
+          set -euo pipefail
+          if ! aws iam get-policy --policy-arn "arn:aws:iam::${EXPECTED_AWS_ACCOUNT_ID}:policy/auto-shop/auto-shop-boundary" >/dev/null 2>&1; then
+            echo "::error::The bootstrap permission boundary is not present in the expected account."
+            exit 1
+          fi
+
+      - name: Require the runner to be in the EKS administrator allowlist
+        if: inputs.stack == 'platform' || inputs.stack == 'hml'
+        run: |
+          set +e
+          bash scripts/eks-endpoint-access.sh private-runner-allowed
+          runner_access_status=$?
+          set -e
+          if [[ "$runner_access_status" -eq 10 ]]; then
+            echo "::error::The Actions runner is outside the EKS administrator allowlist; no platform apply was started."
+            exit 1
+          fi
+          if [[ "$runner_access_status" -ne 0 ]]; then
+            exit "$runner_access_status"
+          fi
+
+      - name: Verify and apply the exact saved plan
+        env:
+          STACK: ${{ inputs.stack }}
+          PLAN_ID: ${{ inputs.plan_id }}
+          SESSION_ID: ${{ inputs.session_id }}
+          SESSION_STARTED_AT: ${{ inputs.started_at }}
+          SESSION_MODE: ${{ inputs.session_mode }}
+          PLAN_SCOPE: ${{ inputs.operation }}
+          ENABLE_NAT_GATEWAY: ${{ inputs.enable_nat_gateway }}
+          REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          terraform_root="$(python3 scripts/terraform_root.py "$STACK")"
+          umask 077
+          plan_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$plan_dir"' EXIT
+          plan_file="$plan_dir/$STACK.tfplan"
+          plan_json="$plan_dir/plan.json"
+          manifest_file="$plan_dir/manifest.json"
+          plan_key="$PLAN_PREFIX/$PLAN_ID/apply/$STACK.tfplan"
+          manifest_key="$PLAN_PREFIX/$PLAN_ID/apply/manifest-$STACK.json"
+
+          aws s3 cp "s3://$PLAN_BUCKET/$plan_key" "$plan_file" \
+            --region "$REQUESTED_AWS_REGION" \
+            --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
+            --only-show-errors
+          aws s3 cp "s3://$PLAN_BUCKET/$manifest_key" "$manifest_file" \
+            --region "$REQUESTED_AWS_REGION" \
+            --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
+            --only-show-errors
+
+          python3 scripts/terraform_plan_artifact.py verify-attestation \
+            --manifest "$manifest_file" \
+            --attestation "$RUNNER_TEMP/k8s-plan-attestation/manifest.sha256"
+
+          python3 scripts/terraform_plan_artifact.py verify \
+            --manifest "$manifest_file" \
+            --plan-file "$plan_file" \
+            --plan-id "$PLAN_ID" \
+            --purpose apply \
+            --aws-account-id "$EXPECTED_AWS_ACCOUNT_ID" \
+            --aws-region "$REQUESTED_AWS_REGION" \
+            --stack "$STACK" \
+            --commit-sha "$GITHUB_SHA" \
+            --session-id "$SESSION_ID" \
+            --session-started-at "$SESSION_STARTED_AT" \
+            --session-mode "$SESSION_MODE" \
+            --scope "$PLAN_SCOPE" \
+            --terraform-version "$TF_VERSION"
+
+          terraform -chdir="$terraform_root" init -input=false
+          terraform -chdir="$terraform_root" show -json "$plan_file" > "$plan_json"
+          if [[ "$STACK" == "foundation" ]]; then
+            bash scripts/validate-eks-endpoint-plan.sh "$plan_json"
+          fi
+          python3 scripts/terraform_plan_guard.py --plan-json "$plan_json" --policy "$PLAN_SCOPE"
+          session_operation="work"
+          minimum_remaining_seconds=3600
+          if [[ "$PLAN_SCOPE" == "nat-disable" ]]; then
+            session_operation="teardown"
+            minimum_remaining_seconds=720
+          fi
+          python3 scripts/validate_staging_session.py \
+            --session-id "$SESSION_ID" \
+            --started-at "$SESSION_STARTED_AT" \
+            --mode "$SESSION_MODE" \
+            --operation "$session_operation" \
+            --minimum-remaining-seconds "$minimum_remaining_seconds"
+          terraform -chdir="$terraform_root" apply \
+            -input=false \
+            -lock-timeout=300s \
+            "$plan_file" >/dev/null
+
+          echo "$STACK applied from saved plan $PLAN_ID." >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/delete-plan-artifact.sh "$PLAN_ID" apply "$STACK"
+
+      - name: Smoke test
+        if: inputs.stack == 'platform'
+        run: ./scripts/smoke.sh | tee -a "$GITHUB_STEP_SUMMARY"

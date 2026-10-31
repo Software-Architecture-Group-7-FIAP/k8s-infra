@@ -1106,6 +1106,18 @@ data "aws_iam_policy_document" "deploy_iam" {
   }
 
   statement {
+    sid       = "PassPrivateK8sRunnerRoleOnlyToCodeBuild"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:${local.partition}:iam::${local.account_id}:role/auto-shop/k8s-infra-codebuild-private-runner"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["codebuild.amazonaws.com"]
+    }
+  }
+
+  statement {
     sid       = "PassAwsServiceRoles"
     actions   = ["iam:PassRole"]
     resources = ["arn:${local.partition}:iam::${local.account_id}:role/aws-service-role/*"]

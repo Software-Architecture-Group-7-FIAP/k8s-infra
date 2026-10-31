@@ -17,6 +17,7 @@ class VerifyPlanRunTests(unittest.TestCase):
             repository="owner/repo",
             api_url="https://api.github.com",
             token="token",
+            expected_workflow_path=None,
         )
 
     def run_record(self, **overrides: object) -> dict[str, object]:
@@ -75,6 +76,25 @@ class VerifyPlanRunTests(unittest.TestCase):
     def test_destroy_plan_requires_destroy_workflow(self) -> None:
         record = self.run_record(path=".github/workflows/destroy.yml@refs/heads/main")
         self.assertEqual(self.check_with_record(record, arguments=self.arguments(purpose="destroy")), 0)
+
+    def test_accepts_cluster_plan_workflow_for_cluster_apply(self) -> None:
+        arguments = self.arguments()
+        arguments.expected_workflow_path = ".github/workflows/cluster-ci.yml"
+        record = self.run_record(path=".github/workflows/cluster-ci.yml@refs/heads/main")
+        self.assertEqual(self.check_with_record(record, arguments=arguments), 0)
+
+    def test_accepts_cluster_destroy_workflow_for_cluster_destroy_apply(self) -> None:
+        arguments = self.arguments(purpose="destroy")
+        arguments.expected_workflow_path = ".github/workflows/cluster-destroy.yml"
+        record = self.run_record(path=".github/workflows/cluster-destroy.yml@refs/heads/main")
+        self.assertEqual(self.check_with_record(record, arguments=arguments), 0)
+
+    def test_rejects_a_cluster_workflow_for_the_wrong_plan_purpose(self) -> None:
+        arguments = self.arguments(purpose="destroy")
+        arguments.expected_workflow_path = ".github/workflows/cluster-ci.yml"
+        record = self.run_record(path=".github/workflows/cluster-ci.yml@refs/heads/main")
+        with self.assertRaisesRegex(PlanRunError, "not allowed"):
+            self.check_with_record(record, arguments=arguments)
 
     def test_rejects_an_attempt_that_does_not_match_plan_id(self) -> None:
         arguments = self.arguments(plan_id="202-2")

@@ -1,4 +1,5 @@
 name: CI
+# HML/platform lifecycle plans run only in the isolated cluster-ci.yml CodeBuild workflow.
 run-name: ${{ inputs.session_id || github.event.pull_request.number || github.run_id }}-${{ inputs.stack || 'all' }}-${{ inputs.operation || 'plan' }}:${{ inputs.lifecycle_dispatch_id || github.run_id }}
 
 on:
@@ -31,8 +32,6 @@ on:
         type: choice
         options:
           - foundation
-          - platform
-          - hml
           - production
       operation:
         description: Open the session or disable only the shared NAT and its routes
@@ -57,6 +56,9 @@ env:
   EXPECTED_AWS_ACCOUNT_ID: "035611741563"
   LIFECYCLE_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
   TF_VAR_cluster_endpoint_public_access_cidrs: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
+  TF_VAR_enable_private_eks_runner: ${{ vars.ENABLE_PRIVATE_EKS_RUNNER || 'false' }}
+  TF_VAR_github_runner_group_id: ${{ vars.GITHUB_RUNNER_GROUP_ID || '0' }}
+  TF_VAR_github_codeconnection_arn: ${{ vars.GITHUB_CODECONNECTION_ARN || '' }}
 
 jobs:
   environment-policy:
@@ -165,6 +167,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Require persistent private-runner configuration for foundation
+        env:
+          REQUESTED_STACK: ${{ inputs.stack }}
+        run: python3 scripts/require_private_runner_configuration.py
+
       - name: Reject a reused lifecycle dispatch ID
         env:
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
@@ -196,7 +203,7 @@ jobs:
             exit 1
           fi
           case "$REQUESTED_STACK" in
-            foundation|platform|hml|production) ;;
+            foundation|production) ;;
             *) echo "::error::Unsupported Terraform stack."; exit 1 ;;
           esac
           case "$REQUESTED_OPERATION" in
@@ -373,7 +380,11 @@ jobs:
           fi
           terraform -chdir="$terraform_root" show -json "$plan_file" > "$plan_json"
           if [[ "$STACK" == "foundation" ]]; then
-            bash scripts/validate-eks-endpoint-plan.sh "$plan_json"
+            if [[ "$PLAN_SCOPE" == "nat-disable" ]]; then
+              bash scripts/validate-eks-endpoint-plan.sh "$plan_json" --allow-cluster-absent
+            else
+              bash scripts/validate-eks-endpoint-plan.sh "$plan_json"
+            fi
           fi
           python3 scripts/terraform_plan_guard.py --plan-json "$plan_json" --policy "$PLAN_SCOPE"
           ./scripts/plan-summary.sh "$plan_file" "$STACK" >> "$GITHUB_STEP_SUMMARY"

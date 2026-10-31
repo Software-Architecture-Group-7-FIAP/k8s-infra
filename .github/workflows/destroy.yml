@@ -1,4 +1,5 @@
 name: Destroy
+# HML/platform teardown runs only in the isolated cluster-destroy.yml CodeBuild workflow.
 run-name: ${{ inputs.session_id }}-${{ inputs.stack }}-${{ inputs.scope }}-${{ inputs.operation }}:${{ inputs.lifecycle_dispatch_id || github.run_id }}
 
 # Teardown is always a separate plan review and explicitly confirmed workflow dispatch.
@@ -17,9 +18,7 @@ on:
         required: true
         type: choice
         options:
-          - hml
           - production
-          - platform
           - foundation
       scope:
         description: Use all for an environment/platform root or compute for foundation; persistent network resources are protected
@@ -75,6 +74,9 @@ env:
   PLAN_PREFIX: k8s-infra/staging/plans
   EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
   TF_VAR_cluster_endpoint_public_access_cidrs: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
+  TF_VAR_enable_private_eks_runner: ${{ vars.ENABLE_PRIVATE_EKS_RUNNER || 'false' }}
+  TF_VAR_github_runner_group_id: ${{ vars.GITHUB_RUNNER_GROUP_ID || '0' }}
+  TF_VAR_github_codeconnection_arn: ${{ vars.GITHUB_CODECONNECTION_ARN || '' }}
 
 jobs:
   destroy-plan:
@@ -91,6 +93,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Require persistent private-runner configuration for foundation
+        env:
+          REQUESTED_STACK: ${{ inputs.stack }}
+        run: python3 scripts/require_private_runner_configuration.py
 
       - name: Reject a reused lifecycle dispatch ID
         env:
@@ -118,7 +125,7 @@ jobs:
             exit 1
           fi
           case "$REQUESTED_STACK" in
-            hml|production|platform)
+            production)
               if [[ "$REQUESTED_SCOPE" != "all" ]]; then
                 echo "::error::Environment and platform roots require scope=all."
                 exit 1
@@ -375,6 +382,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Require persistent private-runner configuration for foundation
+        env:
+          REQUESTED_STACK: ${{ inputs.stack }}
+        run: python3 scripts/require_private_runner_configuration.py
+
       - name: Reject a reused lifecycle dispatch ID
         env:
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
@@ -404,7 +416,7 @@ jobs:
             exit 1
           fi
           case "$REQUESTED_STACK" in
-            hml|production|platform)
+            production)
               if [[ "$REQUESTED_SCOPE" != "all" ]]; then
                 echo "::error::Environment and platform roots require scope=all."
                 exit 1
@@ -435,7 +447,7 @@ jobs:
             exit 1
           fi
           case "$REQUESTED_STACK" in
-            hml|production|foundation|platform) ;;
+            production|foundation) ;;
             *) echo "::error::Unsupported Terraform stack."; exit 1 ;;
           esac
           python3 scripts/validate_staging_session.py \
@@ -630,5 +642,3 @@ jobs:
             "$plan_file" >/dev/null
           echo "$STACK destroyed from saved plan $PLAN_ID." >> "$GITHUB_STEP_SUMMARY"
           bash scripts/delete-plan-artifact.sh "$PLAN_ID" destroy "$STACK"
-
-\n

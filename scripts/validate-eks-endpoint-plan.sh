@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -ne 1 || ! -f "$1" ]]; then
-  echo "Usage: $0 <terraform-plan-json>" >&2
+if [[ "$#" -lt 1 || "$#" -gt 2 || ! -f "$1" ]]; then
+  echo "Usage: $0 <terraform-plan-json> [--allow-cluster-absent]" >&2
   exit 2
+fi
+
+allow_cluster_absent=false
+if [[ "$#" -eq 2 ]]; then
+  [[ "$2" == "--allow-cluster-absent" ]] || {
+    echo "Unsupported endpoint-plan option: $2" >&2
+    exit 2
+  }
+  allow_cluster_absent=true
 fi
 
 expected_cidrs="${TF_VAR_cluster_endpoint_public_access_cidrs:-}"
@@ -35,14 +44,15 @@ print(json.dumps(sorted(network.with_prefixlen for network in networks), separat
 PY
 )"
 
-if ! jq -e --argjson expected "$normalized_expected" '
+if ! jq -e --argjson expected "$normalized_expected" --argjson allow_absent "$allow_cluster_absent" '
   def module_resources:
     (.resources[]?),
     (.child_modules[]? | module_resources);
   [.planned_values.root_module | module_resources
     | select(.type == "aws_eks_cluster")
     | .values] as $clusters
-  | if ($clusters | length) != 1 then false
+  | if ($clusters | length) == 0 then $allow_absent
+    elif ($clusters | length) != 1 then false
     elif (($clusters[0].vpc_config | type) != "array" or ($clusters[0].vpc_config | length) != 1) then false
     else $clusters[0].vpc_config[0] as $vpc
       | $vpc.endpoint_public_access == true
@@ -50,8 +60,13 @@ if ! jq -e --argjson expected "$normalized_expected" '
         and (($vpc.public_access_cidrs // [] | sort) == $expected)
     end
 ' "$1" >/dev/null; then
-  echo "Terraform plan must keep one EKS cluster with public and private access enabled and the exact restricted IPv4 administrator allowlist." >&2
+  echo "Terraform plan must keep one EKS cluster with public and private access enabled and the exact restricted IPv4 administrator allowlist; only NAT shutdown may run after the cluster has been destroyed." >&2
   exit 1
+fi
+
+if jq -e '.planned_values.root_module | [.. | objects | select(.type? == "aws_eks_cluster")] | length == 0' "$1" >/dev/null; then
+  echo "EKS cluster is already absent; the caller must still enforce NAT-only plan scope."
+  exit 0
 fi
 
 cidr_count="$(jq -r 'length' <<<"$normalized_expected")"
