@@ -40,7 +40,7 @@ variable "state_bucket" {
 }
 
 variable "plan_environments" {
-  description = "GitHub Environments that read-only plan jobs use in addition to the exact main-ref subject."
+  description = "GitHub Environments that replace the bare main-ref subject for read-only plan roles."
   type        = map(list(string))
   default = {
     "k8s-infra"      = ["staging"]
@@ -78,72 +78,42 @@ variable "plan_artifact_prefixes" {
 variable "repositories" {
   description = <<-EOT
     Repositories allowed to assume a plan role from protected main-branch/Environment workflows and a
-    deploy role (apply/destroy). The `sub` claim uses the exact immutable organization and repository
-    IDs for every repository, so a repository rename or recreation cannot reuse the old trust.
-    deploy_environments lists the GitHub Environments whose deploy workflow may assume the deploy
-    role. deploy_workflows contains exact Environment/workflow/ref tuples; each tuple creates a
-    separate trust statement. workflow_ref optionally adds an exact GitHub custom subject suffix
-    (`owner/repo/.github/workflows/file.yml@refs/...`) alongside the default Environment subject,
-    currently used only by k8s-infra's HML/PRD apply and destroy workflows.
+    deploy role. The `sub` claim uses the exact default immutable organization and repository IDs,
+    so a repository rename or recreation cannot reuse the old trust. `deploy_environments` lists the
+    GitHub Environments whose immutable default subjects may assume the generic deploy role.
 
-    The IAM `sub` for a job using a GitHub Environment names the repository and environment, but does
-    not encode the branch. Each repository must therefore configure exact Environment deployment
-    branch policies and validate the expected branch in its workflow before requesting credentials.
-    `plan_environments` adds Environment subjects to the default exact main-ref subject. Only the
-    k8s-infra plan job requests OIDC under a GitHub Environment (`staging`); database-infra's
-    read-only plan job has no Environment and uses its `refs/heads/main` subject. Add an Environment
-    here only when the corresponding plan job requests OIDC under that Environment.
+    Under the default immutable GitHub subject, a job using an Environment has a subject containing
+    the repository IDs and Environment name, but not the workflow file or branch. AWS STS accepts
+    `aud` and `sub` for this provider; workflow/ref claims cannot be separate IAM trust conditions.
+    Therefore each Environment must have an exact deployment-branch policy, and its workflow must
+    validate the expected event/ref before requesting credentials.
 
-    For k8s-infra and database-infra, the existing `staging` Environment remains main-only for
-    lifecycle workflows. k8s-infra HML uses its separately scoped gh-deploy-k8s-hml role from the
-    saved-plan Apply/Destroy workflows; branch-pipeline has no AWS trust. k8s-infra PRD is disabled.
-    Database infrastructure retains its separate HML and PRD delivery environments.
+    When `plan_environments` is set for a repository, its plan role accepts only those Environment
+    subjects rather than a bare main-ref subject. k8s-infra's
+    lifecycle jobs use `staging`; database-infra's read-only plan uses `aws-plan`, while its actual
+    apply/destroy jobs use `staging` on main. The validation-only database delivery workflow does not
+    receive deploy trust. The dedicated lambda-auth HML role is separate from the generic deploy role
+    and currently has only HML state access pending a reviewed Terraform plan and generated policy.
 
-    auto-shop-system deploys from `hml` on develop and `prd` on main; its `operations` Environment
-    is used by the app's separate read-only preflight role, not this deploy-role map. lambda-auth
-    deploys to `hml` or `prd` through workflow_dispatch from main. Their exact Environment branch
-    policies are GitHub settings outside Terraform and must stay aligned with those workflow guards.
+    auto-shop-system deploys from `hml` on develop and `prd` on main. lambda-auth's generic deploy
+    role is restricted to `prd`; HML uses its dedicated role. Environment branch policies are GitHub
+    settings outside Terraform and must stay aligned with workflow guards.
   EOT
   type = map(object({
     deploy_environments = list(string)
-    deploy_workflows = list(object({
-      environment  = string
-      workflow     = string
-      ref          = string
-      workflow_ref = optional(string, "")
-    }))
   }))
   default = {
     "k8s-infra" = {
       deploy_environments = ["staging"]
-      deploy_workflows = [
-        { environment = "staging", workflow = "Apply", ref = "refs/heads/main", workflow_ref = "Software-Architecture-Group-7-FIAP/k8s-infra/.github/workflows/apply.yml@refs/heads/main" },
-        { environment = "staging", workflow = "Destroy", ref = "refs/heads/main", workflow_ref = "Software-Architecture-Group-7-FIAP/k8s-infra/.github/workflows/destroy.yml@refs/heads/main" },
-      ]
     }
     "database-infra" = {
-      deploy_environments = ["staging", "hml", "production"]
-      deploy_workflows = [
-        { environment = "staging", workflow = "Apply database staging", ref = "refs/heads/main" },
-        { environment = "staging", workflow = "Destroy database staging", ref = "refs/heads/main" },
-        { environment = "hml", workflow = "Database infrastructure delivery", ref = "refs/heads/develop" },
-        { environment = "production", workflow = "Database infrastructure delivery", ref = "refs/heads/main" },
-      ]
+      deploy_environments = ["staging"]
     }
     "lambda-auth" = {
-      deploy_environments = ["hml", "prd"]
-      deploy_workflows = [
-        { environment = "hml", workflow = "Promote lambda-auth", ref = "refs/heads/main" },
-        { environment = "prd", workflow = "Promote lambda-auth", ref = "refs/heads/main" },
-      ]
+      deploy_environments = ["prd"]
     }
     "auto-shop-system" = {
       deploy_environments = ["hml", "prd"]
-      deploy_workflows = [
-        { environment = "hml", workflow = "CD Staging", ref = "refs/heads/develop" },
-        { environment = "prd", workflow = "CD Production", ref = "refs/heads/main" },
-        { environment = "prd", workflow = "Lifecycle ledger bootstrap", ref = "refs/heads/main" },
-      ]
     }
   }
 }

@@ -18,6 +18,11 @@ output "hml_deploy_role_arn" {
   value       = aws_iam_role.hml_deploy.arn
 }
 
+output "lambda_auth_hml_deploy_role_arn" {
+  description = "Dedicated HML lambda-auth role; currently grants only the isolated HML Terraform state access until a reviewed plan policy is attached."
+  value       = aws_iam_role.lambda_auth_hml_deploy.arn
+}
+
 output "orphan_audit_role_arn" {
   description = "Read-only GitHub OIDC role for the k8s-infra staging and environment-root orphan audit (set as AWS_AUDIT_ROLE_ARN)."
   value       = aws_iam_role.orphan_audit.arn

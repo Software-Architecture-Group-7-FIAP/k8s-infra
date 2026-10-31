@@ -9,12 +9,6 @@ locals {
     for repo in keys(var.repositories) :
     repo => "repo:${var.github_org}@${var.github_org_id}/${repo}@${var.github_repository_ids[repo]}"
   }
-  k8s_workflow_ref = {
-    plan    = "${var.github_org}/k8s-infra/.github/workflows/ci.yml@refs/heads/main"
-    apply   = "${var.github_org}/k8s-infra/.github/workflows/apply.yml@refs/heads/main"
-    destroy = "${var.github_org}/k8s-infra/.github/workflows/destroy.yml@refs/heads/main"
-    audit   = "${var.github_org}/k8s-infra/.github/workflows/orphan-audit.yml@refs/heads/main"
-  }
 }
 
 # Account-wide singleton: one GitHub OIDC provider shared by the four repositories.
@@ -24,17 +18,15 @@ resource "aws_iam_openid_connect_provider" "github" {
 }
 
 # Read-only role for coordinator-authorized terraform plans from main-branch jobs and explicitly listed
-# protected GitHub Environments. The `sub` condition matches the immutable organization and repository
-# IDs exactly, so a repository rename or recreation cannot reuse the old repository's AWS trust.
-# k8s-infra additionally accepts the exact custom subject for its own CI plan workflow.
+# protected GitHub Environments. The `sub` condition matches the default immutable organization and
+# repository IDs exactly, so a repository rename or recreation cannot reuse the old repository's trust.
 #
 # `sub` is the ONLY condition here, by design, not by omission: this account's STS only honors `aud`
 # and `sub` as AssumeRoleWithWebIdentity condition context for this OIDC provider. The GitHub-issued
-# token also contains `repository` and `event_name`, but STS does not match them as condition keys.
-# Requiring either makes the role permanently unassumable; this was confirmed empirically on
-# 2026-10-26 (see var.repositories for the account-specific details).
-# Pull requests are deliberately excluded. A plan role can only be assumed by main-branch and
-# protected-Environment workflows after they validate the signed lifecycle capability.
+# token also contains workflow/ref claims, but STS does not match them as condition keys; this was
+# confirmed empirically on 2026-10-26. With GitHub's default immutable subject, workflow and branch
+# restrictions are enforced by the protected Environment's deployment-branch policy and by each
+# workflow's pre-credential ref/event checks. Pull requests are excluded from AWS credentials.
 data "aws_iam_policy_document" "plan_trust" {
   for_each = var.repositories
 
@@ -56,28 +48,27 @@ data "aws_iam_policy_document" "plan_trust" {
       test     = "StringEquals"
       variable = "${local.oidc_host}:sub"
       values = concat(
-        ["${local.repo_subject[each.key]}:ref:refs/heads/main"],
+        length(lookup(var.plan_environments, each.key, [])) == 0 ? [
+          "${local.repo_subject[each.key]}:ref:refs/heads/main"
+        ] : [],
         [
           for env in lookup(var.plan_environments, each.key, []) :
           "${local.repo_subject[each.key]}:environment:${env}"
-        ],
-        each.key == "k8s-infra" ? [
-          "${local.repo_subject[each.key]}:environment:staging:workflow_ref:${local.k8s_workflow_ref.plan}"
-        ] : []
+        ]
       )
     }
   }
 }
 
-# Deploy role: each allowed Environment/workflow/ref tuple remains a separate statement. For
-# k8s-infra, that statement accepts both the current exact default Environment subject and the
-# exact custom subject containing the workflow file/ref. Other repositories keep their existing
-# exact default subjects until their own subject templates are configured.
+# Deploy role: trust only the configured default immutable Environment subjects. GitHub does not
+# include workflow/ref in its default immutable Environment subject, and STS cannot match those
+# claims separately. Each Environment must therefore have the exact deployment-branch policy, and
+# its workflow must check the expected event/ref before requesting credentials.
 data "aws_iam_policy_document" "deploy_trust" {
   for_each = var.repositories
 
   dynamic "statement" {
-    for_each = each.value.deploy_workflows
+    for_each = each.value.deploy_environments
 
     content {
       actions = ["sts:AssumeRoleWithWebIdentity"]
@@ -97,18 +88,14 @@ data "aws_iam_policy_document" "deploy_trust" {
       condition {
         test     = "StringEquals"
         variable = "${local.oidc_host}:sub"
-        values = compact([
-          "${local.repo_subject[each.key]}:environment:${statement.value.environment}",
-          statement.value.workflow_ref == "" ? "" : "${local.repo_subject[each.key]}:environment:${statement.value.environment}:workflow_ref:${statement.value.workflow_ref}",
-        ])
+        values   = ["${local.repo_subject[each.key]}:environment:${statement.value}"]
       }
     }
   }
 }
 
-# Read-only identity for the coordinator-triggered staging orphan audit. It temporarily accepts
-# the current staging Environment subject and the exact custom subject for orphan-audit.yml on
-# main. The staging Environment policy and workflow guards remain main-only.
+# Read-only identity for the coordinator-triggered staging orphan audit. The staging Environment
+# policy and workflow guard restrict credential requests to main and orphan-audit.yml.
 data "aws_iam_policy_document" "orphan_audit_trust" {
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
@@ -127,10 +114,7 @@ data "aws_iam_policy_document" "orphan_audit_trust" {
     condition {
       test     = "StringEquals"
       variable = "${local.oidc_host}:sub"
-      values = [
-        "${local.repo_subject["k8s-infra"]}:environment:staging",
-        "${local.repo_subject["k8s-infra"]}:environment:staging:workflow_ref:${local.k8s_workflow_ref.audit}",
-      ]
+      values   = ["${local.repo_subject["k8s-infra"]}:environment:staging"]
     }
   }
 }
@@ -577,11 +561,7 @@ data "aws_iam_policy_document" "hml_deploy_trust" {
     condition {
       test     = "StringEquals"
       variable = "${local.oidc_host}:sub"
-      values = [
-        "${local.repo_subject["k8s-infra"]}:environment:staging",
-        "${local.repo_subject["k8s-infra"]}:environment:staging:workflow_ref:${local.k8s_workflow_ref.apply}",
-        "${local.repo_subject["k8s-infra"]}:environment:staging:workflow_ref:${local.k8s_workflow_ref.destroy}",
-      ]
+      values   = ["${local.repo_subject["k8s-infra"]}:environment:staging"]
     }
   }
 }
@@ -803,6 +783,85 @@ resource "aws_iam_role_policy" "hml_deploy" {
   name   = "hml-saved-plan-only"
   role   = aws_iam_role.hml_deploy.name
   policy = data.aws_iam_policy_document.hml_deploy.json
+}
+
+# Dedicated HML lambda-auth role. It intentionally has backend-only permissions until the
+# lambda-auth Terraform plan is reviewed and a least-privilege deployment policy is generated.
+# The production generic deploy role is not trusted for HML and this role receives no PowerUser.
+data "aws_iam_policy_document" "lambda_auth_hml_trust" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_host}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_host}:sub"
+      values   = ["${local.repo_subject["lambda-auth"]}:environment:hml"]
+    }
+  }
+}
+
+resource "aws_iam_role" "lambda_auth_hml_deploy" {
+  name                 = "gh-deploy-lambda-auth-hml"
+  path                 = var.iam_path
+  description          = "HML lambda-auth role; currently limited to the isolated HML Terraform state."
+  assume_role_policy   = data.aws_iam_policy_document.lambda_auth_hml_trust.json
+  max_session_duration = 3600
+}
+
+data "aws_iam_policy_document" "lambda_auth_hml_state" {
+  statement {
+    sid       = "ReadBackendBucketLocation"
+    actions   = ["s3:GetBucketLocation"]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}"]
+  }
+
+  statement {
+    sid       = "ListOnlyHmlBackendState"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}"]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["lambda-auth/hml/terraform.tfstate"]
+    }
+  }
+
+  statement {
+    sid = "ReadWriteOnlyHmlBackendAndNativeLock"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+    ]
+    resources = [
+      "arn:${local.partition}:s3:::${var.state_bucket}/lambda-auth/hml/terraform.tfstate",
+      "arn:${local.partition}:s3:::${var.state_bucket}/lambda-auth/hml/terraform.tfstate.tflock",
+    ]
+  }
+
+  statement {
+    sid       = "VerifyAwsAccount"
+    actions   = ["sts:GetCallerIdentity"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "lambda_auth_hml_state" {
+  name   = "lambda-auth-hml-state-only"
+  role   = aws_iam_role.lambda_auth_hml_deploy.name
+  policy = data.aws_iam_policy_document.lambda_auth_hml_state.json
 }
 
 # Permissions boundary every role created under /auto-shop/ must carry. It mirrors PowerUserAccess
