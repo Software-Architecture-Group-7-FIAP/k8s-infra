@@ -17,7 +17,7 @@ PRD_WORK_END_TIME = time(22, 0)
 PRD_CLEANUP_END_TIME = time(23, 0)
 HML_EARLIEST_START = time(7, 0)
 HML_LATEST_START = time(17, 0)
-HML_LAST_DATE = date(2026, 10, 31)
+HML_LAST_DATE = date(2026, 11, 5)
 HML_WORK_END_TIME = time(22, 0)
 STARTED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 class StagingSessionError(ValueError):
@@ -81,7 +81,7 @@ def validate_staging_session(
     local_now = now.astimezone(PRD_TIMEZONE)
     local_start = start.astimezone(PRD_TIMEZONE)
     if mode == "hml" and local_now.date() > HML_LAST_DATE:
-        raise StagingSessionError("HML lifecycle actions are disabled after 31 October 2026 BRT.")
+        raise StagingSessionError("HML lifecycle actions are disabled after 05 November 2026 BRT.")
 
     expected_session_prefix = "hml" if mode == "hml" else "prd"
     expected_session_id = f"{expected_session_prefix}-{local_start.date().isoformat()}"

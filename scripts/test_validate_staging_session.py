@@ -29,6 +29,21 @@ class ValidateStagingSessionTests(unittest.TestCase):
 
         self.assertEqual(remaining.total_seconds(), 3 * 60 * 60)
 
+    def test_hml_lifecycle_window_matches_the_approved_spend_end_date(self) -> None:
+        remaining = self.validate(
+            session_id="hml-2026-11-05",
+            started_at="2026-11-05T10:00:00Z",  # 07:00 BRT
+            now=datetime(2026, 11, 5, 11, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(remaining.total_seconds(), 4 * 60 * 60)
+        with self.assertRaisesRegex(StagingSessionError, "after 05 November 2026 BRT"):
+            self.validate(
+                session_id="hml-2026-11-06",
+                started_at="2026-11-06T10:00:00Z",
+                now=datetime(2026, 11, 6, 11, 0, tzinfo=timezone.utc),
+            )
+
     def test_rejects_inactive_session_for_work(self) -> None:
         with self.assertRaisesRegex(StagingSessionError, "STAGING_ACTIVE"):
             self.validate(active="false")
