@@ -11,7 +11,9 @@ data "aws_iam_policy_document" "lambda_auth_hml_deploy_service" {
     condition {
       test     = "StringEquals"
       variable = "iam:PermissionsBoundary"
-      values   = [aws_iam_policy.project_boundary.arn]
+      values = [
+        "arn:${local.partition}:iam::${local.account_id}:policy${var.iam_path}auto-shop-boundary"
+      ]
     }
   }
 

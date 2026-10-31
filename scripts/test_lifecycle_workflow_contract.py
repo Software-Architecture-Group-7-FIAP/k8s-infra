@@ -178,7 +178,12 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
         )[0]
         self.assertIn('"iam:CreateRole"', lambda_hml_deploy_policy)
         self.assertIn('variable = "iam:PermissionsBoundary"', lambda_hml_deploy_policy)
-        self.assertIn("aws_iam_policy.project_boundary.arn", lambda_hml_deploy_policy)
+        expected_boundary_arn = 'arn:${local.partition}:iam::${local.account_id}:policy${var.iam_path}auto-shop-boundary'
+        self.assertIn(expected_boundary_arn, lambda_hml_deploy_policy)
+        deploy_iam_policy = bootstrap.split(
+            'data "aws_iam_policy_document" "deploy_iam" {', maxsplit=1
+        )[1].split('resource "aws_iam_policy" "deploy_iam"', maxsplit=1)[0]
+        self.assertIn(expected_boundary_arn, deploy_iam_policy)
         self.assertIn('variable = "iam:PassedToService"', lambda_hml_deploy_policy)
         create_role_statement = lambda_hml_deploy_policy.split(
             'sid       = "CreateBoundedLambdaExecutionRole"', maxsplit=1
