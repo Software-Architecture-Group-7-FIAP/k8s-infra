@@ -1,0 +1,57 @@
+name: HML branch readiness handoff
+run-name: hml-${{ github.event.pull_request.number || github.run_id }}
+
+# This workflow validates the HML target only. Pushes never request AWS credentials or apply
+# Terraform; the application coordinator uses ci.yml and apply.yml with the lifecycle ledger.
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-hml-target:
+    name: validate isolated HML target
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify HML state isolation and shared-cluster reference
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          import re
+
+          root = pathlib.Path("envs/hml")
+          source = "\n".join(path.read_text(encoding="utf-8") for path in root.glob("*.tf"))
+          backend = re.findall(r'backend\s+"s3"\s*\{([^}]*)\}', source, re.DOTALL)
+          keys = [
+              match.group(1)
+              for block in backend
+              for match in re.finditer(r'^\s*key\s*=\s*"([^"]+)"\s*$', block, re.MULTILINE)
+          ]
+          if len(backend) != 1 or keys != ["k8s-infra/hml/terraform.tfstate"]:
+              raise SystemExit("HML must use only k8s-infra/hml/terraform.tfstate.")
+          if 'name = "/auto-shop/staging/eks/cluster-name"' not in source:
+              raise SystemExit("HML must read the existing staging EKS cluster contract.")
+          if "module \"eks\"" in source or "module \"network\"" in source:
+              raise SystemExit("HML must not declare shared EKS or network infrastructure.")
+          if 'create_namespace = false' not in source:
+              raise SystemExit("HML requires the separately bootstrapped namespace.")
+          PY
+
+      - name: Hand off HML deployment through the lifecycle workflow
+        if: github.event_name == 'push'
+        run: |
+          {
+            echo "### HML deployment handoff"
+            echo "- This push does not apply Terraform and does not request AWS credentials."
+            echo "- The coordinator must create a saved plan with ci.yml and apply it with apply.yml using the matching session, lifecycle dispatch ID, trusted operator, and current cost review."
+            echo "- Before HML planning, an authorized cluster administrator must apply .github/hml-namespace-bootstrap.yaml to create auto-shop-hml and its scoped RoleBindings. The HML role cannot create or delete namespaces."
+          } >> "$GITHUB_STEP_SUMMARY"

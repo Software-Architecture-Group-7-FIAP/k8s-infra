@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: auto-shop-hml
+  labels:
+    app.kubernetes.io/part-of: auto-shop-platform
+    auto-shop/environment: hml
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: auto-shop-deployer-crds
+  namespace: auto-shop-hml
+rules:
+  - apiGroups: [elbv2.k8s.aws]
+    resources: [targetgroupbindings]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [external-secrets.io]
+    resources: [externalsecrets]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: auto-shop-deployer-crds
+  namespace: auto-shop-hml
+subjects:
+  - kind: Group
+    name: auto-shop-deployers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: auto-shop-deployer-crds
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: auto-shop-hml-infrastructure
+  namespace: auto-shop-hml
+rules:
+  - apiGroups: [""]
+    resources: [limitranges, resourcequotas]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [external-secrets.io]
+    resources: [secretstores, externalsecrets]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: auto-shop-hml-infrastructure
+  namespace: auto-shop-hml
+subjects:
+  - kind: Group
+    name: auto-shop-hml-infra
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: auto-shop-hml-infrastructure
+  apiGroup: rbac.authorization.k8s.io

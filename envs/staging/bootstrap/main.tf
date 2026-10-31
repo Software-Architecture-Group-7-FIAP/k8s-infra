@@ -5,6 +5,16 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
   partition  = data.aws_partition.current.partition
   oidc_host  = "token.actions.githubusercontent.com"
+  repo_subject = {
+    for repo in keys(var.repositories) :
+    repo => "repo:${var.github_org}@${var.github_org_id}/${repo}@${var.github_repository_ids[repo]}"
+  }
+  k8s_workflow_ref = {
+    plan    = "${var.github_org}/k8s-infra/.github/workflows/ci.yml@refs/heads/main"
+    apply   = "${var.github_org}/k8s-infra/.github/workflows/apply.yml@refs/heads/main"
+    destroy = "${var.github_org}/k8s-infra/.github/workflows/destroy.yml@refs/heads/main"
+    audit   = "${var.github_org}/k8s-infra/.github/workflows/orphan-audit.yml@refs/heads/main"
+  }
 }
 
 # Account-wide singleton: one GitHub OIDC provider shared by the four repositories.
@@ -16,6 +26,7 @@ resource "aws_iam_openid_connect_provider" "github" {
 # Read-only role for coordinator-authorized terraform plans from main-branch jobs and explicitly listed
 # protected GitHub Environments. The `sub` condition matches the immutable organization and repository
 # IDs exactly, so a repository rename or recreation cannot reuse the old repository's AWS trust.
+# k8s-infra additionally accepts the exact custom subject for its own CI plan workflow.
 #
 # `sub` is the ONLY condition here, by design, not by omission: this account's STS only honors `aud`
 # and `sub` as AssumeRoleWithWebIdentity condition context for this OIDC provider. The GitHub-issued
@@ -45,52 +56,59 @@ data "aws_iam_policy_document" "plan_trust" {
       test     = "StringEquals"
       variable = "${local.oidc_host}:sub"
       values = concat(
-        ["repo:${var.github_org}@${var.github_org_id}/${each.key}@${var.github_repository_ids[each.key]}:ref:refs/heads/main"],
+        ["${local.repo_subject[each.key]}:ref:refs/heads/main"],
         [
           for env in lookup(var.plan_environments, each.key, []) :
-          "repo:${var.github_org}@${var.github_org_id}/${each.key}@${var.github_repository_ids[each.key]}:environment:${env}"
-        ]
+          "${local.repo_subject[each.key]}:environment:${env}"
+        ],
+        each.key == "k8s-infra" ? [
+          "${local.repo_subject[each.key]}:environment:staging:workflow_ref:${local.k8s_workflow_ref.plan}"
+        ] : []
       )
     }
   }
 }
 
-# Deploy role: only assumable from one of this repository's GitHub Environments (var.repositories),
-# matched via `sub` (the proven-reliable claim — see plan_trust) rather than the `environment`
-# condition key. Branch pinning comes from the environment's own deployment-branch policy
-# (configured outside Terraform, restricted to `main`): GitHub never issues a token with this
-# `environment` claim for a run on a different branch, so the job fails before a token exists.
+# Deploy role: each allowed Environment/workflow/ref tuple remains a separate statement. For
+# k8s-infra, that statement accepts both the current exact default Environment subject and the
+# exact custom subject containing the workflow file/ref. Other repositories keep their existing
+# exact default subjects until their own subject templates are configured.
 data "aws_iam_policy_document" "deploy_trust" {
   for_each = var.repositories
 
-  statement {
-    actions = ["sts:AssumeRoleWithWebIdentity"]
+  dynamic "statement" {
+    for_each = each.value.deploy_workflows
 
-    principals {
-      type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
-    }
+    content {
+      actions = ["sts:AssumeRoleWithWebIdentity"]
+      effect  = "Allow"
 
-    condition {
-      test     = "StringEquals"
-      variable = "${local.oidc_host}:aud"
-      values   = ["sts.amazonaws.com"]
-    }
+      principals {
+        type        = "Federated"
+        identifiers = [aws_iam_openid_connect_provider.github.arn]
+      }
 
-    condition {
-      test     = "StringEquals"
-      variable = "${local.oidc_host}:sub"
-      values = [
-        for env in each.value.deploy_environments :
-        "repo:${var.github_org}@${var.github_org_id}/${each.key}@${var.github_repository_ids[each.key]}:environment:${env}"
-      ]
+      condition {
+        test     = "StringEquals"
+        variable = "${local.oidc_host}:aud"
+        values   = ["sts.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "${local.oidc_host}:sub"
+        values = compact([
+          "${local.repo_subject[each.key]}:environment:${statement.value.environment}",
+          statement.value.workflow_ref == "" ? "" : "${local.repo_subject[each.key]}:environment:${statement.value.environment}:workflow_ref:${statement.value.workflow_ref}",
+        ])
+      }
     }
   }
 }
 
-# Read-only identity for the coordinator-triggered staging orphan audit. It trusts only this
-# repository's protected staging Environment; the Environment's deployment-branch policy limits
-# the job to main, as enforced for the deploy role.
+# Read-only identity for the coordinator-triggered staging orphan audit. It temporarily accepts
+# the current staging Environment subject and the exact custom subject for orphan-audit.yml on
+# main. The staging Environment policy and workflow guards remain main-only.
 data "aws_iam_policy_document" "orphan_audit_trust" {
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
@@ -109,7 +127,10 @@ data "aws_iam_policy_document" "orphan_audit_trust" {
     condition {
       test     = "StringEquals"
       variable = "${local.oidc_host}:sub"
-      values   = ["repo:${var.github_org}@${var.github_org_id}/k8s-infra@${var.github_repository_ids["k8s-infra"]}:environment:staging"]
+      values = [
+        "${local.repo_subject["k8s-infra"]}:environment:staging",
+        "${local.repo_subject["k8s-infra"]}:environment:staging:workflow_ref:${local.k8s_workflow_ref.audit}",
+      ]
     }
   }
 }
@@ -149,6 +170,8 @@ data "aws_iam_policy_document" "orphan_audit" {
       values = [
         "k8s-infra/staging/foundation.tfstate",
         "k8s-infra/staging/platform.tfstate",
+        "k8s-infra/hml/terraform.tfstate",
+        "k8s-infra/production/terraform.tfstate",
       ]
     }
   }
@@ -159,6 +182,8 @@ data "aws_iam_policy_document" "orphan_audit" {
     resources = [
       "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/foundation.tfstate",
       "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/platform.tfstate",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/hml/terraform.tfstate",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/production/terraform.tfstate",
     ]
   }
 }
@@ -189,7 +214,9 @@ data "aws_iam_policy_document" "state" {
     condition {
       test     = "StringLike"
       variable = "s3:prefix"
-      values   = ["${each.key}/*"]
+      values = each.key == "k8s-infra" ? [
+        "k8s-infra/staging/*",
+      ] : ["${each.key}/*"]
     }
   }
 
@@ -204,14 +231,21 @@ data "aws_iam_policy_document" "state" {
     condition {
       test     = "StringNotLike"
       variable = "s3:prefix"
-      values   = ["${each.key}/*"]
+      values = each.key == "k8s-infra" ? [
+        "k8s-infra/staging/*",
+      ] : ["${each.key}/*"]
     }
   }
 
   statement {
-    sid       = "ReadWriteOwnState"
-    actions   = ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion"]
-    resources = ["arn:${local.partition}:s3:::${var.state_bucket}/${each.key}/*"]
+    sid     = "ReadWriteOwnState"
+    actions = ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion"]
+    resources = each.key == "k8s-infra" ? [
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/foundation.tfstate",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/foundation.tfstate.tflock",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/platform.tfstate",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/platform.tfstate.tflock",
+    ] : ["arn:${local.partition}:s3:::${var.state_bucket}/${each.key}/*"]
   }
 
   # ReadOnlyAccess/PowerUserAccess grant S3 broadly (including GetObjectVersion on a versioned bucket);
@@ -222,6 +256,27 @@ data "aws_iam_policy_document" "state" {
     actions = ["s3:*"]
     resources = [
       for repo in keys(var.repositories) : "arn:${local.partition}:s3:::${var.state_bucket}/${repo}/*" if repo != each.key
+    ]
+  }
+
+  # The generic k8s-infra deploy identity has PowerUserAccess for shared staging operations.
+  # Explicitly keep it away from isolated environment states and HML/PRD plan files so those roots
+  # can only be applied through their separately reviewed role and state path.
+  statement {
+    sid     = "DenyIsolatedK8sEnvironmentStateAndPlans"
+    effect  = "Deny"
+    actions = ["s3:*"]
+    resources = [
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/hml/*",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/production/*",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/plans/*/apply/hml.tfplan",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/plans/*/destroy/hml.tfplan",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/plans/*/apply/manifest-hml.json",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/plans/*/destroy/manifest-hml.json",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/plans/*/apply/production.tfplan",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/plans/*/destroy/production.tfplan",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/plans/*/apply/manifest-production.json",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/plans/*/destroy/manifest-production.json",
     ]
   }
 
@@ -457,7 +512,7 @@ data "aws_iam_policy_document" "plan_restrictions" {
 resource "aws_iam_policy" "plan_restrictions" {
   name        = "auto-shop-plan-restrictions"
   path        = var.iam_path
-  description = "Denies sensitive data-plane reads for repository-scoped plan roles (ReadOnlyAccess is otherwise account-wide)."
+  description = "Denies sensitive data-plane reads for PR-triggered plan roles (ReadOnlyAccess is otherwise account-wide)."
   policy      = data.aws_iam_policy_document.plan_restrictions.json
 
   # The AWS provider replaces managed policies when description changes. Preserve the attached
@@ -479,7 +534,7 @@ resource "aws_iam_role" "deploy" {
 
   name                 = "gh-deploy-${each.key}"
   path                 = var.iam_path
-  description          = "Deploy role for ${each.key}; assumable only from apply.yml/destroy.yml on main."
+  description          = "Deploy role for ${each.key}; trust is scoped to configured exact GitHub OIDC subjects."
   assume_role_policy   = data.aws_iam_policy_document.deploy_trust[each.key].json
   max_session_duration = 7200
 }
@@ -499,6 +554,255 @@ resource "aws_iam_role_policy_attachment" "deploy_state" {
 
   role       = aws_iam_role.deploy[each.key].name
   policy_arn = aws_iam_policy.state[each.key].arn
+}
+
+# The HML root uses a dedicated saved-plan role. It has no PowerUser attachment and is restricted
+# to the HML state key, HML plan artifacts, the shared cluster read contract, the HML migration role,
+# and one namespace-scoped Pod Identity association.
+data "aws_iam_policy_document" "hml_deploy_trust" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_host}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_host}:sub"
+      values = [
+        "${local.repo_subject["k8s-infra"]}:environment:staging",
+        "${local.repo_subject["k8s-infra"]}:environment:staging:workflow_ref:${local.k8s_workflow_ref.apply}",
+        "${local.repo_subject["k8s-infra"]}:environment:staging:workflow_ref:${local.k8s_workflow_ref.destroy}",
+      ]
+    }
+  }
+}
+
+resource "aws_iam_role" "hml_deploy" {
+  name                 = "gh-deploy-k8s-hml"
+  path                 = var.iam_path
+  description          = "Least-privilege HML saved-plan role; namespace access is scoped by its EKS access entry."
+  assume_role_policy   = data.aws_iam_policy_document.hml_deploy_trust.json
+  max_session_duration = 3600
+}
+
+data "aws_iam_policy_document" "hml_deploy" {
+  statement {
+    sid       = "ListOnlyHmlBackendPrefix"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}"]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["k8s-infra/hml/terraform.tfstate*"]
+    }
+  }
+
+  statement {
+    sid = "ReadWriteOnlyHmlBackendAndNativeLock"
+    actions = [
+      "s3:GetObject", "s3:PutObject", "s3:DeleteObject",
+    ]
+    resources = [
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/hml/terraform.tfstate",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/hml/terraform.tfstate.tflock",
+    ]
+  }
+
+  statement {
+    sid = "ReadAndConsumeOnlyHmlSavedPlans"
+    actions = [
+      "s3:GetObject", "s3:GetObjectVersion", "s3:DeleteObject", "s3:DeleteObjectVersion",
+    ]
+    resources = [
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/plans/*/apply/hml.tfplan",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/plans/*/destroy/hml.tfplan",
+    ]
+  }
+
+  statement {
+    sid = "ReadAndConsumeOnlyHmlPlanManifests"
+    actions = [
+      "s3:GetObject", "s3:GetObjectVersion", "s3:DeleteObject", "s3:DeleteObjectVersion",
+    ]
+    resources = [
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/plans/*/apply/manifest-hml.json",
+      "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/plans/*/destroy/manifest-hml.json",
+    ]
+  }
+
+  statement {
+    sid = "InspectPrivatePlanBucketControls"
+    actions = [
+      "s3:GetBucketLocation", "s3:GetBucketPublicAccessBlock", "s3:GetBucketOwnershipControls",
+    ]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}"]
+  }
+
+  statement {
+    sid       = "DescribeOnlyTheSharedStagingCluster"
+    actions   = ["eks:DescribeCluster"]
+    resources = ["arn:${local.partition}:eks:${var.aws_region}:${local.account_id}:cluster/auto-shop-staging"]
+  }
+
+  statement {
+    sid       = "ReadOnlyTheHmlMigrationRole"
+    actions   = ["iam:GetRole"]
+    resources = ["arn:${local.partition}:iam::${local.account_id}:role/auto-shop/auto-shop-staging-db-migrate-hml"]
+  }
+
+  statement {
+    sid       = "CheckTheCurrentAwsAccount"
+    actions   = ["sts:GetCallerIdentity"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid     = "ReadOnlyHmlNetworkAndClusterParameters"
+    actions = ["ssm:GetParameter"]
+    resources = [
+      "arn:${local.partition}:ssm:${var.aws_region}:${local.account_id}:parameter/auto-shop/staging/eks/cluster-name",
+      "arn:${local.partition}:ssm:${var.aws_region}:${local.account_id}:parameter/auto-shop/staging/network/vpc-cidr",
+      "arn:${local.partition}:ssm:${var.aws_region}:${local.account_id}:parameter/auto-shop/staging/network/rds-isolated-subnet-cidrs",
+      "arn:${local.partition}:ssm:${var.aws_region}:${local.account_id}:parameter/auto-shop/staging/network/alb-subnet-cidrs",
+    ]
+  }
+
+  statement {
+    sid       = "CreateOnlyTheHmlMigrationAssociation"
+    actions   = ["eks:CreatePodIdentityAssociation"]
+    resources = ["arn:${local.partition}:eks:${var.aws_region}:${local.account_id}:cluster/auto-shop-staging"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Environment"
+      values   = ["hml"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/KubernetesNamespace"
+      values   = ["auto-shop-hml"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Purpose"
+      values   = ["db-migration"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Project"
+      values   = ["auto-shop"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/ManagedBy"
+      values   = ["Terraform"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Repository"
+      values   = ["k8s-infra"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Stack"
+      values   = ["hml"]
+    }
+
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "aws:TagKeys"
+      values   = ["Project", "Environment", "ManagedBy", "Repository", "Stack", "KubernetesNamespace", "Purpose"]
+    }
+  }
+
+  statement {
+    sid = "ManageOnlyTaggedHmlMigrationAssociation"
+    actions = [
+      "eks:DescribePodIdentityAssociation",
+      "eks:UpdatePodIdentityAssociation",
+      "eks:DeletePodIdentityAssociation",
+      "eks:ListTagsForResource",
+    ]
+    resources = [
+      "arn:${local.partition}:eks:${var.aws_region}:${local.account_id}:podidentityassociation/auto-shop-staging/*",
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = ["hml"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/KubernetesNamespace"
+      values   = ["auto-shop-hml"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Purpose"
+      values   = ["db-migration"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = ["auto-shop"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/ManagedBy"
+      values   = ["Terraform"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Repository"
+      values   = ["k8s-infra"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Stack"
+      values   = ["hml"]
+    }
+  }
+
+  statement {
+    sid       = "PassOnlyHmlMigrationRoleToPodIdentity"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:${local.partition}:iam::${local.account_id}:role/auto-shop/auto-shop-staging-db-migrate-hml"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["pods.eks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "hml_deploy" {
+  name   = "hml-saved-plan-only"
+  role   = aws_iam_role.hml_deploy.name
+  policy = data.aws_iam_policy_document.hml_deploy.json
 }
 
 # Permissions boundary every role created under /auto-shop/ must carry. It mirrors PowerUserAccess

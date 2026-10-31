@@ -8,11 +8,6 @@ variable "vpc_id" {
   type        = string
 }
 
-variable "vpc_cidr" {
-  description = "VPC CIDR allowed to reach the listeners (VPC Link V2 ENIs live inside the VPC)."
-  type        = string
-}
-
 variable "subnet_ids" {
   description = "Private workload subnets for the internal ALB."
   type        = list(string)

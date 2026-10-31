@@ -46,7 +46,12 @@ def _managed_addresses(path: Path) -> list[str]:
     return addresses
 
 
-def verify_session_state(foundation_file: Path, platform_file: Path) -> None:
+def verify_session_state(
+    foundation_file: Path,
+    platform_file: Path,
+    hml_file: Path | None = None,
+    production_file: Path | None = None,
+) -> None:
     platform = _managed_addresses(platform_file)
     foundation = _managed_addresses(foundation_file)
     violations: list[str] = []
@@ -54,6 +59,16 @@ def verify_session_state(foundation_file: Path, platform_file: Path) -> None:
     if platform:
         violations.append("platform state must be empty after teardown; remaining managed addresses:")
         violations.extend(f"  {address}" for address in platform)
+
+    for environment, state_file in (("HML", hml_file), ("production", production_file)):
+        if state_file is None:
+            continue
+        environment_addresses = _managed_addresses(state_file)
+        if environment_addresses:
+            violations.append(
+                f"{environment} state must be empty after teardown; remaining managed addresses:"
+            )
+            violations.extend(f"  {address}" for address in environment_addresses)
 
     unexpected_foundation = [
         address
@@ -72,7 +87,7 @@ def verify_session_state(foundation_file: Path, platform_file: Path) -> None:
         raise StateAuditError("\n".join(violations))
 
     print(
-        "Terraform state audit passed: platform has no managed resources; "
+        "Terraform state audit passed: platform and environment roots have no managed resources; "
         f"foundation retains {len(foundation)} persistent network/contract resources."
     )
 
@@ -89,9 +104,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--foundation-state", required=True, type=Path)
     parser.add_argument("--platform-state", required=True, type=Path)
+    parser.add_argument("--hml-state", type=Path)
+    parser.add_argument("--production-state", type=Path)
     arguments = parser.parse_args()
     try:
-        verify_session_state(arguments.foundation_state, arguments.platform_state)
+        verify_session_state(
+            arguments.foundation_state,
+            arguments.platform_state,
+            arguments.hml_state,
+            arguments.production_state,
+        )
     except StateAuditError as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1

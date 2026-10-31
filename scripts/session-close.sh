@@ -5,10 +5,6 @@ set -euo pipefail
 session_mode="${REQUESTED_SESSION_MODE:-}"
 session_id="${REQUESTED_SESSION_ID:-}"
 started_at="${REQUESTED_STARTED_AT:-}"
-if [[ -n "${STAGING_SESSION_TOKEN:-}" ]]; then
-  echo "::add-mask::${STAGING_SESSION_TOKEN}"
-fi
-
 python3 scripts/validate_staging_session.py \
   --session-id "$session_id" \
   --started-at "$started_at" \
