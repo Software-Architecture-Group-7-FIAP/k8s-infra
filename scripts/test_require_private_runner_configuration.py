@@ -21,7 +21,7 @@ class PrivateRunnerConfigurationTests(unittest.TestCase):
             )
 
     def test_foundation_operations_require_a_connection_arn(self) -> None:
-        with self.assertRaisesRegex(RunnerConfigurationError, "GITHUB_CODECONNECTION_ARN"):
+        with self.assertRaisesRegex(RunnerConfigurationError, "AWS_CODECONNECTION_ARN"):
             validate_runner_configuration(stack="foundation", enabled="true", group_id="12", connection_arn="")
 
     def test_valid_foundation_runner_configuration_passes(self) -> None:

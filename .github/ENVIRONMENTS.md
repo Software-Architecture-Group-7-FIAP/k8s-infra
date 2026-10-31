@@ -67,8 +67,8 @@ restricted to selected workflows. Before opening a coordinated session:
 2. Complete the pending GitHub CodeConnections connection `auto-shop-k8s-private-runner` in AWS
    account `035611741563`, region `us-east-1`. Authorize the GitHub organization and select only the
    `k8s-infra` repository; the connection must report `AVAILABLE` before the foundation apply.
-3. Set repository variables `ENABLE_PRIVATE_EKS_RUNNER=true`, `GITHUB_RUNNER_GROUP_ID` to the custom
-   group ID (greater than the default ID `1`), and `GITHUB_CODECONNECTION_ARN` to the authorized
+3. Set repository variables `ENABLE_PRIVATE_EKS_RUNNER=true`, `PRIVATE_EKS_RUNNER_GROUP_ID` to the custom
+   group ID (greater than the default ID `1`), and `AWS_CODECONNECTION_ARN` to the authorized
    connection ARN.
 4. Set the application repository variable `K8S_PRIVATE_RUNNER_PREREQUISITES_READY=true` only after
    the group and connection are configured. The coordinator then provisions the CodeBuild project in

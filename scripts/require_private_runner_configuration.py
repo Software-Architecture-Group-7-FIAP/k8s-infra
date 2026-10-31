@@ -33,11 +33,11 @@ def validate_runner_configuration(
     try:
         parsed_group_id = int(group_id)
     except ValueError as error:
-        raise RunnerConfigurationError("GITHUB_RUNNER_GROUP_ID must identify a custom organization runner group.") from error
+        raise RunnerConfigurationError("PRIVATE_EKS_RUNNER_GROUP_ID must identify a custom organization runner group.") from error
     if parsed_group_id <= 1:
-        raise RunnerConfigurationError("GITHUB_RUNNER_GROUP_ID must be greater than the default group ID 1.")
+        raise RunnerConfigurationError("PRIVATE_EKS_RUNNER_GROUP_ID must be greater than the default group ID 1.")
     if not CONNECTION_ARN.fullmatch(connection_arn):
-        raise RunnerConfigurationError("GITHUB_CODECONNECTION_ARN must be a valid CodeConnections connection ARN.")
+        raise RunnerConfigurationError("AWS_CODECONNECTION_ARN must be a valid CodeConnections connection ARN.")
 
 
 def main() -> int:
