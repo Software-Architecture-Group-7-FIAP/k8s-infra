@@ -45,10 +45,14 @@ namespace.
 
 Bootstrap order: create the IAM role by applying the reviewed bootstrap configuration; have the
 cluster administrator apply the namespace/RBAC manifest; apply the shared foundation root so it can
-install the two HML access entries; then create and review the HML saved plan and dispatch the
-matching lifecycle-gated apply. Keep the namespace and its bootstrap RBAC outside HML state teardown;
-remove them only through an explicitly authorized cluster-administrator operation after the HML
-root has been destroyed and the shared cluster is ready for removal.
+install the two HML access entries; confirm the shared `platform` root is current, since its External
+Secrets Operator install for `auto-shop-hml` (`external-secrets-hml` namespace, scoped to that
+namespace) must already be running — `envs/hml`'s `SecretStore` and `ExternalSecret` resources are
+`kubernetes_manifest` objects, and `terraform plan` fails on a missing CRD, not a clear ordering
+error, if ESO has not reconciled for `hml` yet; then create and review the HML saved plan and
+dispatch the matching lifecycle-gated apply. Keep the namespace and its bootstrap RBAC outside HML
+state teardown; remove them only through an explicitly authorized cluster-administrator operation
+after the HML root has been destroyed and the shared cluster is ready for removal.
 
 ## OIDC subject migration
 

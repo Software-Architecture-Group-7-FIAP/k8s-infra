@@ -366,6 +366,10 @@ resource "kubernetes_network_policy_v1" "alb_ingress" {
   }
 }
 
+# Requires envs/staging/platform's External Secrets Operator install for this environment to already
+# be applied and reconciled: the SecretStore/ExternalSecret CRDs this kubernetes_manifest depends on
+# come from that chart, not from this root. A stale or missing platform apply fails this root's
+# `terraform plan` with a CRD-not-found error, not a clear cross-root ordering message.
 resource "kubernetes_manifest" "app_runtime_store" {
   manifest = {
     apiVersion = "external-secrets.io/v1"
