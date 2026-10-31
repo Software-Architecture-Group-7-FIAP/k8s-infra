@@ -51,3 +51,45 @@ resource "kubernetes_limit_range_v1" "this" {
     }
   }
 }
+
+# The HML environment role may manage only its environment-specific database bootstrap
+# ServiceAccount in the shared operations namespace. The AWS role association and ServiceAccount
+# remain in the isolated HML Terraform state so its authorized destroy removes both.
+resource "kubernetes_role_v1" "hml_database_bootstrap_identity" {
+  metadata {
+    name      = "hml-database-bootstrap-identity"
+    namespace = kubernetes_namespace_v1.this.metadata[0].name
+  }
+
+  rule {
+    api_groups = [""]
+    resources  = ["serviceaccounts"]
+    verbs      = ["create"]
+  }
+
+  rule {
+    api_groups     = [""]
+    resources      = ["serviceaccounts"]
+    resource_names = ["auto-shop-db-bootstrap-hml"]
+    verbs          = ["get", "update", "patch", "delete"]
+  }
+}
+
+resource "kubernetes_role_binding_v1" "hml_database_bootstrap_identity" {
+  metadata {
+    name      = kubernetes_role_v1.hml_database_bootstrap_identity.metadata[0].name
+    namespace = kubernetes_namespace_v1.this.metadata[0].name
+  }
+
+  subject {
+    kind      = "Group"
+    name      = "auto-shop-hml-infra"
+    api_group = "rbac.authorization.k8s.io"
+  }
+
+  role_ref {
+    kind      = "Role"
+    name      = kubernetes_role_v1.hml_database_bootstrap_identity.metadata[0].name
+    api_group = "rbac.authorization.k8s.io"
+  }
+}

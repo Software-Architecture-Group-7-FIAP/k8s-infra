@@ -784,6 +784,127 @@ data "aws_iam_policy_document" "hml_deploy" {
       values   = ["pods.eks.amazonaws.com"]
     }
   }
+
+  statement {
+    sid       = "CreateOnlyTheHmlDatabaseBootstrapAssociation"
+    actions   = ["eks:CreatePodIdentityAssociation"]
+    resources = ["arn:${local.partition}:eks:${var.aws_region}:${local.account_id}:cluster/auto-shop-staging"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Environment"
+      values   = ["hml"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/KubernetesNamespace"
+      values   = ["auto-shop-ops"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Purpose"
+      values   = ["db-bootstrap"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Project"
+      values   = ["auto-shop"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/ManagedBy"
+      values   = ["Terraform"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Repository"
+      values   = ["k8s-infra"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Stack"
+      values   = ["hml"]
+    }
+
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "aws:TagKeys"
+      values   = ["Project", "Environment", "ManagedBy", "Repository", "Stack", "KubernetesNamespace", "Purpose"]
+    }
+  }
+
+  statement {
+    sid = "ManageOnlyTaggedHmlDatabaseBootstrapAssociation"
+    actions = [
+      "eks:DescribePodIdentityAssociation",
+      "eks:UpdatePodIdentityAssociation",
+      "eks:DeletePodIdentityAssociation",
+      "eks:ListTagsForResource",
+    ]
+    resources = [
+      "arn:${local.partition}:eks:${var.aws_region}:${local.account_id}:podidentityassociation/auto-shop-staging/*",
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = ["hml"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/KubernetesNamespace"
+      values   = ["auto-shop-ops"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Purpose"
+      values   = ["db-bootstrap"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = ["auto-shop"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/ManagedBy"
+      values   = ["Terraform"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Repository"
+      values   = ["k8s-infra"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Stack"
+      values   = ["hml"]
+    }
+  }
+
+  statement {
+    sid       = "PassOnlyHmlDatabaseBootstrapRoleToPodIdentity"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:${local.partition}:iam::${local.account_id}:role/auto-shop/auto-shop-staging-db-bootstrap-hml"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["pods.eks.amazonaws.com"]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "hml_deploy" {

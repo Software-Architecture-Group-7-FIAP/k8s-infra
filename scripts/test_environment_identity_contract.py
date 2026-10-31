@@ -97,6 +97,12 @@ class EnvironmentIdentityContractTests(unittest.TestCase):
         self.assertIn('name: auto-shop-deployers', hml_bootstrap)
         self.assertIn('name: auto-shop-hml', hml_bootstrap)
         self.assertIn('create_namespace = false', (ROOT / "envs" / "hml" / "main.tf").read_text(encoding="utf-8"))
+        hml_bootstrap_identity = (ROOT / "envs" / "hml" / "database_bootstrap_identity.tf").read_text(encoding="utf-8")
+        ops_role = (ROOT / "envs" / "staging" / "platform" / "namespaces.tf").read_text(encoding="utf-8")
+        self.assertIn('name      = "auto-shop-db-bootstrap-hml"', hml_bootstrap_identity)
+        self.assertIn('Purpose             = "db-bootstrap"', hml_bootstrap_identity)
+        self.assertIn('resource_names = ["auto-shop-db-bootstrap-hml"]', ops_role)
+        self.assertIn('name      = "auto-shop-hml-infra"', ops_role)
         self.assertNotIn("aws-actions/configure-aws-credentials@", branch_pipeline)
         self.assertNotIn("id-token: write", branch_pipeline)
         self.assertNotIn("terraform apply", branch_pipeline)
@@ -135,6 +141,13 @@ class EnvironmentIdentityContractTests(unittest.TestCase):
         self.assertIn('aws:RequestTag/KubernetesNamespace', hml_role)
         self.assertIn('aws:ResourceTag/KubernetesNamespace', hml_role)
         self.assertNotIn('PowerUserAccess', hml_role)
+        bootstrap_association = hml_role.split(
+            'sid       = "CreateOnlyTheHmlDatabaseBootstrapAssociation"', maxsplit=1
+        )[1].split('sid = "ManageOnlyTaggedHmlDatabaseBootstrapAssociation"', maxsplit=1)[0]
+        self.assertIn('values   = ["auto-shop-ops"]', bootstrap_association)
+        self.assertIn('values   = ["db-bootstrap"]', bootstrap_association)
+        self.assertIn('sid       = "PassOnlyHmlDatabaseBootstrapRoleToPodIdentity"', hml_role)
+        self.assertIn('role/auto-shop/auto-shop-staging-db-bootstrap-hml', hml_role)
 
 
 if __name__ == "__main__":

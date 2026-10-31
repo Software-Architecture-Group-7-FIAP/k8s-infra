@@ -21,7 +21,8 @@ share the state objects `k8s-infra/staging/foundation.tfstate` and
 
 The existing `k8s-infra/staging/foundation.tfstate` remains the owner of shared VPC, EKS, NAT, ALB,
 SSM resources, and persistent CodeBuild runner resources. The existing `k8s-infra/staging/platform.tfstate` currently owns only the shared
-ECR repository. No shared-resource migration is needed or intended. The `envs/hml/` and
+ECR repository; the reviewed platform apply adds its shared controllers, IAM, namespaces, and RBAC.
+No shared-resource migration is needed or intended. The `envs/hml/` and
 `envs/production/` roots now exist, but the read-only inventory found no HML or production state
 objects. Their backend keys, `k8s-infra/hml/terraform.tfstate` and
 `k8s-infra/production/terraform.tfstate`, start empty and own only the respective environment's
@@ -38,22 +39,28 @@ The HML state does not own or create the Kubernetes Namespace. Before any HML pl
 authorized cluster administrator must apply `.github/hml-namespace-bootstrap.yaml`. It creates
 `auto-shop-hml` with restricted Pod Security labels and two namespaced RoleBindings: one gives
 `auto-shop-deployers` only TargetGroupBinding/ExternalSecret access; the other gives
-`auto-shop-hml-infra` only quota, limit-range, and External Secrets resource access. The HML role's
-`AmazonEKSAdminPolicy` association is scoped to `auto-shop-hml`; the app role's
-`AmazonEKSEditPolicy` association is also scoped only to `auto-shop-hml`. The HML role has no
-cluster-wide Kubernetes policy and cannot create or delete Namespace objects or access another
-namespace.
+`auto-shop-hml-infra` only quota, limit-range, and External Secrets resource access. The reviewed
+shared `platform` root separately binds that group in `auto-shop-ops` for ServiceAccount creation
+and named get/update/patch/delete access to `auto-shop-db-bootstrap-hml`. The HML role cannot manage
+other resources in `auto-shop-ops`, create/delete Namespace objects, or access another namespace.
+Its `AmazonEKSAdminPolicy` association is scoped to `auto-shop-hml`; the app role's
+`AmazonEKSEditPolicy` association is also scoped only to `auto-shop-hml`. Shared foundation owns the
+EKS access entries; the HML state owns its database-bootstrap ServiceAccount and Pod Identity
+association so an authorized HML teardown removes both.
 
 Bootstrap order: create the IAM role by applying the reviewed bootstrap configuration; have the
 cluster administrator apply the namespace/RBAC manifest; apply the shared foundation root so it can
 install the two HML access entries; confirm the shared `platform` root is current, since its External
 Secrets Operator install for `auto-shop-hml` (`external-secrets-hml` namespace, scoped to that
 namespace) must already be running — `envs/hml`'s `SecretStore` and `ExternalSecret` resources are
-`kubernetes_manifest` objects, and `terraform plan` fails on a missing CRD, not a clear ordering
-error, if ESO has not reconciled for `hml` yet; then create and review the HML saved plan and
-dispatch the matching lifecycle-gated apply. Keep the namespace and its bootstrap RBAC outside HML
-state teardown; remove them only through an explicitly authorized cluster-administrator operation
-after the HML root has been destroyed and the shared cluster is ready for removal.
+`kubernetes_manifest` objects, and `terraform plan` fails on a missing CRD if ESO has not reconciled.
+Next, provision the HML database role and SSM metadata, then create and review the HML saved plan and
+dispatch the matching lifecycle-gated apply; that HML root creates the bootstrap ServiceAccount and
+Pod Identity association. Run database bootstrap only after that association exists. For teardown,
+destroy the HML root first so it removes the ServiceAccount and association, then destroy the HML
+database role and metadata. Keep the namespace and its bootstrap RBAC outside HML state teardown;
+remove them only through an explicitly authorized cluster-administrator operation after the shared
+cluster is ready for removal.
 
 ### Private cluster runner prerequisite
 
