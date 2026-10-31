@@ -31,8 +31,9 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
         variables = (ROOT / "envs" / "staging" / "bootstrap" / "variables.tf").read_text(
             encoding="utf-8"
         )
-        bootstrap = (ROOT / "envs" / "staging" / "bootstrap" / "main.tf").read_text(
-            encoding="utf-8"
+        bootstrap_dir = ROOT / "envs" / "staging" / "bootstrap"
+        bootstrap = "\n".join(
+            path.read_text(encoding="utf-8") for path in sorted(bootstrap_dir.glob("*.tf"))
         )
         ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         branch_pipeline = (ROOT / ".github" / "workflows" / "branch-pipeline.yml").read_text(
@@ -169,6 +170,50 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
         self.assertIn("lambda-auth/hml/terraform.tfstate", lambda_hml_state)
         self.assertIn("terraform.tfstate.tflock", lambda_hml_state)
         self.assertNotIn("PowerUserAccess", lambda_hml_state)
+        lambda_hml_deploy_policy = bootstrap.split(
+            'data "aws_iam_policy_document" "lambda_auth_hml_deploy_service" {', maxsplit=1
+        )[1].split(
+            'resource "aws_iam_role_policy" "lambda_auth_hml_deploy_service"', maxsplit=1
+        )[0]
+        self.assertIn('"iam:CreateRole"', lambda_hml_deploy_policy)
+        self.assertIn('variable = "iam:PermissionsBoundary"', lambda_hml_deploy_policy)
+        self.assertIn("aws_iam_policy.project_boundary.arn", lambda_hml_deploy_policy)
+        self.assertIn('variable = "iam:PassedToService"', lambda_hml_deploy_policy)
+        create_role_statement = lambda_hml_deploy_policy.split(
+            'sid       = "CreateBoundedLambdaExecutionRole"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn(
+            'resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}lambda-auth-hml-execution"]',
+            create_role_statement,
+        )
+        pass_role_statement = lambda_hml_deploy_policy.split(
+            'sid       = "PassOnlyLambdaAuthExecutionRole"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn(
+            'resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}lambda-auth-hml-execution"]',
+            pass_role_statement,
+        )
+        self.assertIn('values   = ["lambda.amazonaws.com"]', pass_role_statement)
+        self.assertIn("alias/auto-shop/hml/lambda-auth/jwt-signing", lambda_hml_deploy_policy)
+        self.assertIn('variable = "kms:ResourceAliases"', lambda_hml_deploy_policy)
+        self.assertIn(
+            "parameter/auto-shop/staging/auth/customer-token/function-arn/hml",
+            lambda_hml_deploy_policy,
+        )
+        lambda_function_statement = lambda_hml_deploy_policy.split(
+            'sid = "ManageOnlyLambdaAuthHmlFunction"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn("function:lambda-auth-hml", lambda_function_statement)
+        self.assertNotIn('resources = ["*"]', lambda_function_statement)
+
+        lambda_hml_deploy_policy_attachment = bootstrap.split(
+            'resource "aws_iam_role_policy" "lambda_auth_hml_deploy_service" {', maxsplit=1
+        )[1].split("\n}", maxsplit=1)[0]
+        self.assertIn("aws_iam_role.lambda_auth_hml_deploy.name", lambda_hml_deploy_policy_attachment)
+        self.assertIn(
+            "data.aws_iam_policy_document.lambda_auth_hml_deploy_service.json",
+            lambda_hml_deploy_policy_attachment,
+        )
         deploy_poweruser = bootstrap.split(
             'resource "aws_iam_role_policy_attachment" "deploy_poweruser" {', maxsplit=1
         )[1].split("\n}", maxsplit=1)[0]
