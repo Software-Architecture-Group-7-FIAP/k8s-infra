@@ -72,6 +72,34 @@ class BootstrapOidcTrustTests(unittest.TestCase):
 
         self.assertIn("ignore_changes = [description]", section)
 
+    def test_deploy_roles_have_boundary_and_backend_access_remains_identity_scoped(self):
+        role_names = ("deploy", "hml_deploy", "lambda_auth_hml_deploy")
+        for name in role_names:
+            with self.subTest(role=name):
+                marker = f'resource "aws_iam_role" "{name}" {{'
+                start = MAIN_TF.index(marker)
+                end = MAIN_TF.index("\n}", start)
+                self.assertIn(
+                    "permissions_boundary = aws_iam_policy.project_boundary.arn",
+                    MAIN_TF[start:end],
+                )
+
+        boundary = MAIN_TF.split(
+            'data "aws_iam_policy_document" "project_boundary"', maxsplit=1
+        )[1].split('resource "aws_iam_policy" "project_boundary"', maxsplit=1)[0]
+        state_bucket_deny = boundary.split(
+            'sid     = "DenyStateBucketRegardlessOfIdentityPolicy"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn('test     = "ArnNotLike"', state_bucket_deny)
+        self.assertIn('role${var.iam_path}gh-deploy-*', state_bucket_deny)
+
+        state_policy = MAIN_TF.split(
+            'data "aws_iam_policy_document" "state"', maxsplit=1
+        )[1].split('resource "aws_iam_policy" "state"', maxsplit=1)[0]
+        self.assertIn("lambda-auth/prd/terraform.tfstate", state_policy)
+        self.assertIn("lambda-auth/prd/terraform.tfstate.tflock", state_policy)
+        self.assertIn('"lambda-auth/prd/*"', state_policy)
+
 
 if __name__ == "__main__":
     unittest.main()
