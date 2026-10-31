@@ -43,7 +43,8 @@ provider "kubernetes" {
 module "environment" {
   source = "../../modules/application-environment"
 
-  environment  = "prd"
-  aws_region   = var.aws_region
-  cluster_name = data.aws_eks_cluster.this.name
+  environment      = "prd"
+  aws_region       = var.aws_region
+  cluster_name     = data.aws_eks_cluster.this.name
+  create_namespace = true
 }
