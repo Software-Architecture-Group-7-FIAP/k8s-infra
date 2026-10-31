@@ -94,7 +94,8 @@ def validate_staging_session(
         if local_start.date() != local_now.date():
             raise StagingSessionError("An HML session must start on the current BRT day.")
         hml_start_time = local_start.time().replace(tzinfo=None)
-        if not HML_EARLIEST_START <= hml_start_time <= HML_LATEST_START:
+        allow_any_time = os.environ.get("STAGING_SESSION_ALLOW_ANY_TIME", "").lower() == "true"
+        if not allow_any_time and not HML_EARLIEST_START <= hml_start_time <= HML_LATEST_START:
             raise StagingSessionError(
                 "HML sessions must start between 07:00 and 17:00 America/Sao_Paulo."
             )
