@@ -100,6 +100,48 @@ class BootstrapOidcTrustTests(unittest.TestCase):
         self.assertIn("lambda-auth/prd/terraform.tfstate.tflock", state_policy)
         self.assertIn('"lambda-auth/prd/*"', state_policy)
 
+    def test_hml_deploy_iam_boundary_grants_are_principal_and_resource_scoped(self):
+        boundary = MAIN_TF.split(
+            'data "aws_iam_policy_document" "project_boundary"', maxsplit=1
+        )[1].split('resource "aws_iam_policy" "project_boundary"', maxsplit=1)[0]
+
+        create_execution_role = boundary.split(
+            'sid       = "AllowHmlLambdaCreateBoundedExecutionRole"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn('actions   = ["iam:CreateRole"]', create_execution_role)
+        self.assertIn("role${var.iam_path}lambda-auth-hml-execution", create_execution_role)
+        self.assertIn('variable = "aws:PrincipalArn"', create_execution_role)
+        self.assertIn("role${var.iam_path}gh-deploy-lambda-auth-hml", create_execution_role)
+        self.assertIn('variable = "iam:PermissionsBoundary"', create_execution_role)
+        self.assertIn("policy${var.iam_path}auto-shop-boundary", create_execution_role)
+
+        manage_execution_role = boundary.split(
+            'sid = "AllowHmlLambdaManageExecutionRole"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn("role${var.iam_path}lambda-auth-hml-execution", manage_execution_role)
+        self.assertIn('variable = "aws:PrincipalArn"', manage_execution_role)
+        self.assertIn("role${var.iam_path}gh-deploy-lambda-auth-hml", manage_execution_role)
+
+        pass_lambda_execution_role = boundary.split(
+            'sid       = "AllowHmlLambdaPassExecutionRole"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn('actions   = ["iam:PassRole"]', pass_lambda_execution_role)
+        self.assertIn("role${var.iam_path}lambda-auth-hml-execution", pass_lambda_execution_role)
+        self.assertIn('variable = "aws:PrincipalArn"', pass_lambda_execution_role)
+        self.assertIn("role${var.iam_path}gh-deploy-lambda-auth-hml", pass_lambda_execution_role)
+        self.assertIn('variable = "iam:PassedToService"', pass_lambda_execution_role)
+        self.assertIn('values   = ["lambda.amazonaws.com"]', pass_lambda_execution_role)
+
+        pass_migration_role = boundary.split(
+            'sid       = "AllowHmlK8sPassMigrationRole"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn('actions   = ["iam:PassRole"]', pass_migration_role)
+        self.assertIn("role/auto-shop/auto-shop-staging-db-migrate-hml", pass_migration_role)
+        self.assertIn('variable = "aws:PrincipalArn"', pass_migration_role)
+        self.assertIn("role${var.iam_path}gh-deploy-k8s-hml", pass_migration_role)
+        self.assertIn('variable = "iam:PassedToService"', pass_migration_role)
+        self.assertIn('values   = ["pods.eks.amazonaws.com"]', pass_migration_role)
+
 
 if __name__ == "__main__":
     unittest.main()

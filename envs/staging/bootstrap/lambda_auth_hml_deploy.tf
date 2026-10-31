@@ -1,5 +1,6 @@
-# Baseline actions came from iam-policy-autopilot over the HML Lambda Terraform plan.
-# Resources and conditions are narrowed to the approved HML contract.
+# HML Lambda permissions are limited to the Terraform resources in the reviewed initial plan.
+# Updates are allowed only for the exact HML function; role pass/manage permissions are bounded
+# again by the shared policy using the deployment role's exact principal ARN.
 
 data "aws_iam_policy_document" "lambda_auth_hml_deploy_service" {
   statement {
@@ -17,10 +18,6 @@ data "aws_iam_policy_document" "lambda_auth_hml_deploy_service" {
   statement {
     sid = "ManageLambdaExecutionRole"
     actions = [
-      "iam:AttachRolePolicy",
-      "iam:DeleteRole",
-      "iam:DeleteRolePolicy",
-      "iam:DetachRolePolicy",
       "iam:GetRole",
       "iam:GetRolePolicy",
       "iam:ListAttachedRolePolicies",
@@ -31,12 +28,6 @@ data "aws_iam_policy_document" "lambda_auth_hml_deploy_service" {
       "iam:UntagRole",
     ]
     resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}lambda-auth-hml-execution"]
-  }
-
-  statement {
-    sid       = "ListLambdaExecutionRoleInstanceProfiles"
-    actions   = ["iam:ListInstanceProfilesForRole"]
-    resources = ["*"]
   }
 
   statement {
@@ -176,10 +167,11 @@ data "aws_iam_policy_document" "lambda_auth_hml_deploy_service" {
     actions = [
       "lambda:CreateFunction",
       "lambda:GetFunction",
+      "lambda:GetFunctionConfiguration",
       "lambda:GetFunctionCodeSigningConfig",
-      "lambda:GetFunctionConcurrency",
       "lambda:ListVersionsByFunction",
-      "lambda:PutFunctionConcurrency",
+      "lambda:UpdateFunctionCode",
+      "lambda:UpdateFunctionConfiguration",
     ]
     resources = ["arn:${local.partition}:lambda:${var.aws_region}:${local.account_id}:function:lambda-auth-hml"]
   }

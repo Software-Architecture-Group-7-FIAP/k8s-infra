@@ -882,8 +882,8 @@ data "aws_iam_policy_document" "project_boundary" {
     resources   = ["*"]
   }
 
-  # Within the boundary, still allow the narrow IAM actions workloads legitimately need
-  # (service-linked roles for ALB/EBS, and reading their own role).
+  # Within the boundary, allow only the IAM operations the HML deploy roles need for
+  # their exact service roles. Generic deploy identities receive no new IAM allowance.
   statement {
     sid       = "AllowServiceLinkedRoles"
     actions   = ["iam:CreateServiceLinkedRole"]
@@ -894,6 +894,81 @@ data "aws_iam_policy_document" "project_boundary" {
     sid       = "AllowReadOwnRole"
     actions   = ["iam:GetRole", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies"]
     resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}*"]
+  }
+
+  statement {
+    sid       = "AllowHmlLambdaCreateBoundedExecutionRole"
+    actions   = ["iam:CreateRole"]
+    resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}lambda-auth-hml-execution"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}gh-deploy-lambda-auth-hml"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PermissionsBoundary"
+      values   = ["arn:${local.partition}:iam::${local.account_id}:policy${var.iam_path}auto-shop-boundary"]
+    }
+  }
+
+  statement {
+    sid = "AllowHmlLambdaManageExecutionRole"
+    actions = [
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListRolePolicies",
+      "iam:ListRoleTags",
+      "iam:PutRolePolicy",
+      "iam:TagRole",
+      "iam:UntagRole",
+    ]
+    resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}lambda-auth-hml-execution"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}gh-deploy-lambda-auth-hml"]
+    }
+  }
+
+  statement {
+    sid       = "AllowHmlLambdaPassExecutionRole"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}lambda-auth-hml-execution"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}gh-deploy-lambda-auth-hml"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["lambda.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid       = "AllowHmlK8sPassMigrationRole"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:${local.partition}:iam::${local.account_id}:role/auto-shop/auto-shop-staging-db-migrate-hml"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}gh-deploy-k8s-hml"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["pods.eks.amazonaws.com"]
+    }
   }
 
   # The boundary caps IAM escalation but, being PowerUser-shaped, otherwise leaves the data plane

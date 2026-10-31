@@ -195,6 +195,17 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
             pass_role_statement,
         )
         self.assertIn('values   = ["lambda.amazonaws.com"]', pass_role_statement)
+        role_management_statement = lambda_hml_deploy_policy.split(
+            'sid = "ManageLambdaExecutionRole"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        for forbidden_action in (
+            '"iam:AttachRolePolicy"',
+            '"iam:DeleteRole"',
+            '"iam:DeleteRolePolicy"',
+            '"iam:DetachRolePolicy"',
+            '"iam:ListInstanceProfilesForRole"',
+        ):
+            self.assertNotIn(forbidden_action, role_management_statement)
         self.assertIn("alias/auto-shop/hml/lambda-auth/jwt-signing", lambda_hml_deploy_policy)
         self.assertIn('variable = "kms:ResourceAliases"', lambda_hml_deploy_policy)
         self.assertIn(
@@ -205,6 +216,12 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
             'sid = "ManageOnlyLambdaAuthHmlFunction"', maxsplit=1
         )[1].split("\n  }", maxsplit=1)[0]
         self.assertIn("function:lambda-auth-hml", lambda_function_statement)
+        self.assertIn('"lambda:GetFunction"', lambda_function_statement)
+        self.assertIn('"lambda:GetFunctionConfiguration"', lambda_function_statement)
+        self.assertIn('"lambda:UpdateFunctionCode"', lambda_function_statement)
+        self.assertIn('"lambda:UpdateFunctionConfiguration"', lambda_function_statement)
+        self.assertNotIn('"lambda:GetFunctionConcurrency"', lambda_function_statement)
+        self.assertNotIn('"lambda:PutFunctionConcurrency"', lambda_function_statement)
         self.assertNotIn('resources = ["*"]', lambda_function_statement)
 
         lambda_hml_deploy_policy_attachment = bootstrap.split(
