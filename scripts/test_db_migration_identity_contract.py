@@ -14,6 +14,9 @@ NETWORK_POLICIES_TF = (PLATFORM_DIR / "network_policies.tf").read_text(
 APPLICATION_ENVIRONMENT_TF = (
     REPO_ROOT / "modules/application-environment/main.tf"
 ).read_text(encoding="utf-8")
+HML_BOOTSTRAP_IDENTITY_TF = (
+    REPO_ROOT / "envs/hml/database_bootstrap_identity.tf"
+).read_text(encoding="utf-8")
 README = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
 
@@ -63,6 +66,21 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
         )
         self.assertIn("`gh-deploy-database-infra`", README)
         self.assertIn("Edit em `auto-shop-ops` (Job de bootstrap de banco)", README)
+
+    def test_hml_database_bootstrap_identity_is_environment_scoped_and_destroyable(self):
+        self.assertIn('namespace = "auto-shop-ops"', HML_BOOTSTRAP_IDENTITY_TF)
+        self.assertIn('name      = "auto-shop-db-bootstrap-hml"', HML_BOOTSTRAP_IDENTITY_TF)
+        self.assertIn(
+            'role_arn        = "arn:aws:iam::${var.expected_account_id}:role/auto-shop/auto-shop-staging-db-bootstrap-hml"',
+            HML_BOOTSTRAP_IDENTITY_TF,
+        )
+        self.assertIn('Purpose             = "db-bootstrap"', HML_BOOTSTRAP_IDENTITY_TF)
+        self.assertIn('KubernetesNamespace = "auto-shop-ops"', HML_BOOTSTRAP_IDENTITY_TF)
+        self.assertIn('resource "aws_eks_pod_identity_association" "database_bootstrap"', HML_BOOTSTRAP_IDENTITY_TF)
+        self.assertIn('resource "kubernetes_role_binding_v1" "hml_database_bootstrap_identity"', PLATFORM_TERRAFORM)
+        self.assertIn('name      = "auto-shop-hml-infra"', PLATFORM_TERRAFORM)
+        self.assertIn('resource_names = ["auto-shop-db-bootstrap-hml"]', PLATFORM_TERRAFORM)
+        self.assertNotIn("owner-read-policy-arn", HML_BOOTSTRAP_IDENTITY_TF)
 
     def test_only_migration_pods_in_each_app_namespace_can_reach_pod_identity_agent(
         self,
