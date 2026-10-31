@@ -167,6 +167,7 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
             'data "aws_iam_policy_document" "lambda_auth_hml_state" {', maxsplit=1
         )[1].split('resource "aws_iam_role_policy" "lambda_auth_hml_state"', maxsplit=1)[0]
         self.assertIn('name                 = "gh-deploy-lambda-auth-hml"', lambda_hml_role)
+        self.assertIn("permissions_boundary = aws_iam_policy.project_boundary.arn", lambda_hml_role)
         self.assertIn("lambda-auth/hml/terraform.tfstate", lambda_hml_state)
         self.assertIn("terraform.tfstate.tflock", lambda_hml_state)
         self.assertNotIn("PowerUserAccess", lambda_hml_state)

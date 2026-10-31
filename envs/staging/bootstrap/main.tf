@@ -200,6 +200,8 @@ data "aws_iam_policy_document" "state" {
       variable = "s3:prefix"
       values = each.key == "k8s-infra" ? [
         "k8s-infra/staging/*",
+        ] : each.key == "lambda-auth" ? [
+        "lambda-auth/prd/*",
       ] : ["${each.key}/*"]
     }
   }
@@ -229,6 +231,9 @@ data "aws_iam_policy_document" "state" {
       "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/foundation.tfstate.tflock",
       "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/platform.tfstate",
       "arn:${local.partition}:s3:::${var.state_bucket}/k8s-infra/staging/platform.tfstate.tflock",
+      ] : each.key == "lambda-auth" ? [
+      "arn:${local.partition}:s3:::${var.state_bucket}/lambda-auth/prd/terraform.tfstate",
+      "arn:${local.partition}:s3:::${var.state_bucket}/lambda-auth/prd/terraform.tfstate.tflock",
     ] : ["arn:${local.partition}:s3:::${var.state_bucket}/${each.key}/*"]
   }
 
@@ -521,6 +526,7 @@ resource "aws_iam_role" "deploy" {
   description          = "Deploy role for ${each.key}; trust is scoped to configured exact GitHub OIDC subjects."
   assume_role_policy   = data.aws_iam_policy_document.deploy_trust[each.key].json
   max_session_duration = 7200
+  permissions_boundary = aws_iam_policy.project_boundary.arn
 }
 
 # Deploy roles use PowerUserAccess plus the scoped IAM policy below. The boundary is required for
@@ -572,6 +578,7 @@ resource "aws_iam_role" "hml_deploy" {
   description          = "Least-privilege HML saved-plan role; namespace access is scoped by its EKS access entry."
   assume_role_policy   = data.aws_iam_policy_document.hml_deploy_trust.json
   max_session_duration = 3600
+  permissions_boundary = aws_iam_policy.project_boundary.arn
 }
 
 data "aws_iam_policy_document" "hml_deploy" {
@@ -817,6 +824,7 @@ resource "aws_iam_role" "lambda_auth_hml_deploy" {
   description          = "HML lambda-auth role; currently limited to the isolated HML Terraform state."
   assume_role_policy   = data.aws_iam_policy_document.lambda_auth_hml_trust.json
   max_session_duration = 3600
+  permissions_boundary = aws_iam_policy.project_boundary.arn
 }
 
 data "aws_iam_policy_document" "lambda_auth_hml_state" {
@@ -911,6 +919,15 @@ data "aws_iam_policy_document" "project_boundary" {
       "arn:${local.partition}:s3:::${var.state_bucket}",
       "arn:${local.partition}:s3:::${var.state_bucket}/*",
     ]
+
+    # Deploy roles need their own backend/lock files. Their per-repository identity policies retain
+    # explicit denies outside each approved state prefix; this exception only prevents the boundary
+    # from blocking those narrowly scoped grants.
+    condition {
+      test     = "ArnNotLike"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}gh-deploy-*"]
+    }
   }
 }
 
