@@ -73,12 +73,13 @@ def verify_session_state(
     unexpected_foundation = [
         address
         for address in foundation
-        if not address.startswith(("module.network.", "module.contract."))
+        if not _is_allowed_persistent_foundation_address(address)
         or _is_nat_resource(address)
     ]
     if unexpected_foundation:
         violations.append(
-            "foundation state may retain only VPC/network resources and the persistent SSM contract; "
+            "foundation state may retain only VPC/network resources, the persistent SSM contract, "
+            "and the explicitly configured private runner service resources; "
             "remaining unexpected addresses:"
         )
         violations.extend(f"  {address}" for address in unexpected_foundation)
@@ -88,8 +89,20 @@ def verify_session_state(
 
     print(
         "Terraform state audit passed: platform and environment roots have no managed resources; "
-        f"foundation retains {len(foundation)} persistent network/contract resources."
+        f"foundation retains {len(foundation)} persistent network/contract/runner resources."
     )
+
+
+def _is_allowed_persistent_foundation_address(address: str) -> bool:
+    return address.startswith(("module.network.", "module.contract.")) or address in {
+        "aws_security_group.private_eks_runner",
+        "aws_iam_role.private_eks_runner",
+        "aws_iam_role_policy.private_eks_runner",
+        "aws_cloudwatch_log_group.private_eks_runner",
+        "aws_codebuild_source_credential.private_eks_runner",
+        "aws_codebuild_project.private_eks_runner",
+        "aws_codebuild_webhook.private_eks_runner",
+    }
 
 
 def _is_nat_resource(address: str) -> bool:

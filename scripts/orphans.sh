@@ -57,7 +57,7 @@ report_aws "RDS cluster snapshots" aws rds describe-db-cluster-snapshots --regio
 report_aws "EKS cluster log groups" aws logs describe-log-groups --region "$REGION" --log-group-name-prefix '/aws/eks/auto-shop-staging/cluster' --query 'logGroups[].logGroupName' --output text
 
 if [ "$FOUND" -eq 0 ]; then
-  echo "No dynamic billable resources left; the persistent VPC, subnets, and SSM contract may remain."
+  echo "No dynamic billable resources left; the persistent VPC, subnets, SSM contract, and private CodeBuild runner service may remain."
 else
   exit 1
 fi

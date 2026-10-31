@@ -8,7 +8,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class LifecycleWorkflowContractTests(unittest.TestCase):
     def test_lifecycle_consumers_bind_current_actor_before_aws_credentials(self) -> None:
-        for workflow_name in ("ci.yml", "apply.yml", "destroy.yml", "orphan-audit.yml"):
+        for workflow_name in (
+            "ci.yml",
+            "apply.yml",
+            "destroy.yml",
+            "cluster-ci.yml",
+            "cluster-apply.yml",
+            "cluster-destroy.yml",
+            "orphan-audit.yml",
+        ):
             workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
             self.assertIn("LIFECYCLE_TRIGGERING_ACTOR: ${{ github.triggering_actor }}", workflow)
             jobs = workflow.split("jobs:", maxsplit=1)[1]
@@ -367,6 +375,18 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
             self.assertLess(workflow.index("scripts/verify_plan_run.py"), workflow.index("actions/download-artifact@"))
             self.assertIn("verify-attestation", workflow)
             self.assertLess(workflow.index("verify-attestation"), workflow.index('terraform -chdir="$terraform_root" apply'))
+
+    def test_foundation_apply_verifies_the_published_ssm_contract_before_artifact_cleanup(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "apply.yml").read_text(encoding="utf-8")
+
+        apply_step = workflow.index('terraform -chdir="$terraform_root" apply')
+        verify_step = workflow.index("scripts/verify_ssm_contract.py")
+        delete_step = workflow.index("scripts/delete-plan-artifact.sh")
+        self.assertLess(apply_step, verify_step)
+        self.assertLess(verify_step, delete_step)
+        self.assertIn('terraform -chdir=envs/staging/foundation output -json ssm_contract', workflow)
+        verifier = (ROOT / "scripts" / "verify_ssm_contract.py").read_text(encoding="utf-8")
+        self.assertIn('"--no-with-decryption",', verifier)
 
     def test_lifecycle_workflows_reject_replayed_dispatch_ids_before_aws_access(self) -> None:
         workflows = (

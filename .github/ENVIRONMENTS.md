@@ -2,7 +2,8 @@
 
 `branch-pipeline.yml` runs static checks for pull requests and pushes to `develop`. It does not use
 OIDC, request AWS credentials, or apply Terraform. There is no production branch trigger. The
-application coordinator must use the saved-plan/session-gated `ci.yml` and `apply.yml` path for HML.
+application coordinator uses the hosted `ci.yml`/`apply.yml` workflows for foundation and the
+session-gated `cluster-ci.yml`/`cluster-apply.yml` workflows for platform and HML.
 
 The HML Apply/Destroy jobs run from `main` in the protected `staging` Environment after validating
 the session ledger, trusted actor, one-use lifecycle dispatch, plan attestation, and confirmation.
@@ -19,7 +20,7 @@ share the state objects `k8s-infra/staging/foundation.tfstate` and
 ## State ownership and deployment gate
 
 The existing `k8s-infra/staging/foundation.tfstate` remains the owner of shared VPC, EKS, NAT, ALB,
-and SSM resources. The existing `k8s-infra/staging/platform.tfstate` currently owns only the shared
+SSM resources, and persistent CodeBuild runner resources. The existing `k8s-infra/staging/platform.tfstate` currently owns only the shared
 ECR repository. No shared-resource migration is needed or intended. The `envs/hml/` and
 `envs/production/` roots now exist, but the read-only inventory found no HML or production state
 objects. Their backend keys, `k8s-infra/hml/terraform.tfstate` and
@@ -54,6 +55,33 @@ dispatch the matching lifecycle-gated apply. Keep the namespace and its bootstra
 state teardown; remove them only through an explicitly authorized cluster-administrator operation
 after the HML root has been destroyed and the shared cluster is ready for removal.
 
+### Private cluster runner prerequisite
+
+The k8s-infra repository is public, so HML/platform lifecycle jobs use an organization runner group
+restricted to selected workflows. Before opening a coordinated session:
+
+1. Create the GitHub organization runner group `k8s-private-eks`, restrict repository access to
+   `Software-Architecture-Group-7-FIAP/k8s-infra`, and allow only `.github/workflows/cluster-ci.yml`,
+   `.github/workflows/cluster-apply.yml`, and `.github/workflows/cluster-destroy.yml` from
+   `refs/heads/main`.
+2. Complete the pending GitHub CodeConnections connection `auto-shop-k8s-private-runner` in AWS
+   account `035611741563`, region `us-east-1`. Authorize the GitHub organization and select only the
+   `k8s-infra` repository; the connection must report `AVAILABLE` before the foundation apply.
+3. Set repository variables `ENABLE_PRIVATE_EKS_RUNNER=true`, `GITHUB_RUNNER_GROUP_ID` to the custom
+   group ID (greater than the default ID `1`), and `GITHUB_CODECONNECTION_ARN` to the authorized
+   connection ARN.
+4. Set the application repository variable `K8S_PRIVATE_RUNNER_PREREQUISITES_READY=true` only after
+   the group and connection are configured. The coordinator then provisions the CodeBuild project in
+   the foundation apply before it dispatches platform/HML plans.
+
+The CodeBuild project runs in the private workload subnets, uses a dedicated outbound-only security
+group, and reaches EKS through private DNS/TCP 443. The public EKS administrator CIDRs are unchanged.
+The runner service role can write its one-day CloudWatch log stream, create VPC interfaces in the
+workload subnets, and read the configured CodeConnections connection; it has no EKS, lifecycle-ledger,
+or `iam:PassRole` permission. The foundation compute teardown preserves the runner project. NAT is
+disabled last, after EKS and foundation compute teardown; the NAT-only plan permits an absent cluster
+but still enforces the NAT-only resource guard.
+
 ## OIDC subject migration
 
 The bootstrap trust policies use only `token.actions.githubusercontent.com:aud` and
@@ -78,10 +106,15 @@ The exact workflow/ref allowlist is:
 | Role | Environment | Workflow file | Ref |
 | --- | --- | --- | --- |
 | `gh-plan-k8s-infra` | `staging` | `.github/workflows/ci.yml` | `refs/heads/main` |
+| `gh-plan-k8s-infra` | `staging` | `.github/workflows/cluster-ci.yml` | `refs/heads/main` |
 | `gh-deploy-k8s-infra` | `staging` | `.github/workflows/apply.yml` | `refs/heads/main` |
 | `gh-deploy-k8s-infra` | `staging` | `.github/workflows/destroy.yml` | `refs/heads/main` |
+| `gh-deploy-k8s-infra` | `staging` | `.github/workflows/cluster-apply.yml` | `refs/heads/main` |
+| `gh-deploy-k8s-infra` | `staging` | `.github/workflows/cluster-destroy.yml` | `refs/heads/main` |
 | `gh-deploy-k8s-hml` | `staging` | `.github/workflows/apply.yml` | `refs/heads/main` |
 | `gh-deploy-k8s-hml` | `staging` | `.github/workflows/destroy.yml` | `refs/heads/main` |
+| `gh-deploy-k8s-hml` | `staging` | `.github/workflows/cluster-apply.yml` | `refs/heads/main` |
+| `gh-deploy-k8s-hml` | `staging` | `.github/workflows/cluster-destroy.yml` | `refs/heads/main` |
 | `gh-audit-k8s-infra` | `staging` | `.github/workflows/orphan-audit.yml` | `refs/heads/main` |
 
 The repository-level subject template has not been changed and no IAM role has been updated by this

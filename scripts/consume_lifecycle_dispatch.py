@@ -17,7 +17,15 @@ from typing import Any
 TABLE_NAME = "auto-shop-staging-lifecycle-sessions"
 TARGET_REPOSITORY = "Software-Architecture-Group-7-FIAP/k8s-infra"
 TARGET_REF = "refs/heads/main"
-WORKFLOWS = ("CI", "Apply", "Destroy", "Orphan Audit")
+WORKFLOWS = (
+    "CI",
+    "Apply",
+    "Destroy",
+    "K8s HML Cluster Plan",
+    "K8s HML Cluster Apply",
+    "K8s HML Cluster Destroy",
+    "Orphan Audit",
+)
 SESSION_PATTERN = re.compile(r"^(hml|prd)-(\d{4}-\d{2}-\d{2})$")
 DISPATCH_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 ACTOR_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,39}(?:\[bot\])?$")
@@ -166,6 +174,14 @@ def _expected_action(workflow: str, inputs: dict[str, str]) -> str:
         return "audit"
     if workflow == "Destroy":
         return "close"
+    if workflow in {"K8s HML Cluster Destroy"}:
+        if inputs.get("operation") in {"plan", "destroy"}:
+            return "close"
+        raise AuthorizationError("The workflow inputs do not identify an allowed lifecycle action.")
+    if workflow in {"K8s HML Cluster Plan", "K8s HML Cluster Apply"}:
+        if inputs.get("operation") == "open":
+            return "open"
+        raise AuthorizationError("The workflow inputs do not identify an allowed lifecycle action.")
     if workflow in {"CI", "Apply"}:
         operation = inputs.get("operation")
         if operation == "open":

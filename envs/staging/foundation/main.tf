@@ -63,10 +63,23 @@ module "eks" {
   subnet_ids               = module.network.workload_subnet_ids
   control_plane_subnet_ids = module.network.workload_subnet_ids
 
-  # ADR-0071 revision 2026-10-25: public + private endpoint, IAM-authenticated; no CodeBuild runner.
+  # ADR-0071 revision 2026-10-25: public + private endpoint, IAM-authenticated; private runner ingress is explicit below.
   endpoint_public_access       = true
   endpoint_public_access_cidrs = var.cluster_endpoint_public_access_cidrs
   endpoint_private_access      = true
+
+  # Cluster workflows run from a private CodeBuild ENI. They resolve the private EKS endpoint and
+  # enter through this exact runner security group; public administrator CIDRs stay unchanged.
+  security_group_additional_rules = var.enable_private_eks_runner ? {
+    private_runner_https = {
+      description              = "HTTPS from the private, ephemeral CodeBuild lifecycle runner"
+      protocol                 = "tcp"
+      from_port                = 443
+      to_port                  = 443
+      type                     = "ingress"
+      source_security_group_id = aws_security_group.private_eks_runner.id
+    }
+  } : {}
 
   # "audit" is the only log that records which admin principal did what; without it an incident via
   # the cluster-admin access entries below leaves no trail. Keep the one-day window from the plan;
@@ -331,4 +344,230 @@ module "contract" {
   }
 
   tags = local.tags
+}
+
+resource "aws_security_group" "private_eks_runner" {
+  name        = "${var.name}-private-runner"
+  description = "Outbound-only security group for ephemeral private EKS lifecycle runners."
+  vpc_id      = module.network.vpc_id
+
+  egress {
+    description = "HTTPS to GitHub, AWS APIs, and the private EKS endpoint"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.tags, { Name = "${var.name}-private-runner" })
+}
+
+locals {
+  private_eks_runner_project_name = "auto-shop-k8s-private"
+  private_eks_runner_project_arn  = "arn:${local.partition}:codebuild:${var.aws_region}:${local.account_id}:project/${local.private_eks_runner_project_name}"
+}
+
+data "aws_iam_policy_document" "private_eks_runner_assume_role" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["codebuild.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [local.account_id]
+    }
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [local.private_eks_runner_project_arn]
+    }
+  }
+}
+
+resource "aws_iam_role" "private_eks_runner" {
+  count = var.enable_private_eks_runner ? 1 : 0
+
+  name                 = "k8s-infra-codebuild-private-runner"
+  path                 = "/auto-shop/"
+  description          = "Minimal VPC and log permissions for ephemeral k8s-infra GitHub Actions jobs."
+  assume_role_policy   = data.aws_iam_policy_document.private_eks_runner_assume_role.json
+  permissions_boundary = local.project_boundary_arn
+
+  tags = local.tags
+}
+
+resource "aws_cloudwatch_log_group" "private_eks_runner" {
+  count = var.enable_private_eks_runner ? 1 : 0
+
+  name              = "/aws/codebuild/${local.private_eks_runner_project_name}"
+  retention_in_days = 1
+  tags              = local.tags
+}
+
+data "aws_iam_policy_document" "private_eks_runner" {
+  count = var.enable_private_eks_runner ? 1 : 0
+
+  statement {
+    sid     = "WriteOnlyRunnerLogs"
+    actions = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = [
+      aws_cloudwatch_log_group.private_eks_runner[0].arn,
+      "${aws_cloudwatch_log_group.private_eks_runner[0].arn}:log-stream:*",
+    ]
+  }
+
+  statement {
+    sid = "ReadTheConfiguredGitHubConnection"
+    actions = [
+      "codeconnections:GetConnection",
+      "codeconnections:GetConnectionToken",
+    ]
+    resources = [var.github_codeconnection_arn]
+  }
+
+  statement {
+    sid = "CreateAndReleaseCodeBuildVpcInterfaces"
+    actions = [
+      "ec2:CreateNetworkInterface",
+      "ec2:DescribeDhcpOptions",
+      "ec2:DescribeNetworkInterfaces",
+      "ec2:DeleteNetworkInterface",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeSecurityGroups",
+      "ec2:DescribeVpcs",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "AuthorizeInterfacesOnlyInWorkloadSubnets"
+    actions   = ["ec2:CreateNetworkInterfacePermission"]
+    resources = ["arn:${local.partition}:ec2:${var.aws_region}:${local.account_id}:network-interface/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "ec2:AuthorizedService"
+      values   = ["codebuild.amazonaws.com"]
+    }
+
+    condition {
+      test     = "ArnEquals"
+      variable = "ec2:Subnet"
+      values = [
+        for subnet_id in module.network.workload_subnet_ids :
+        "arn:${local.partition}:ec2:${var.aws_region}:${local.account_id}:subnet/${subnet_id}"
+      ]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "private_eks_runner" {
+  count = var.enable_private_eks_runner ? 1 : 0
+
+  name   = "private-eks-runner-runtime"
+  role   = aws_iam_role.private_eks_runner[0].id
+  policy = data.aws_iam_policy_document.private_eks_runner[0].json
+}
+
+resource "aws_codebuild_source_credential" "private_eks_runner" {
+  count = var.enable_private_eks_runner ? 1 : 0
+
+  auth_type   = "CODECONNECTIONS"
+  server_type = "GITHUB"
+  token       = var.github_codeconnection_arn
+}
+
+resource "aws_codebuild_project" "private_eks_runner" {
+  count = var.enable_private_eks_runner ? 1 : 0
+
+  name                   = local.private_eks_runner_project_name
+  description            = "Private, ephemeral GitHub Actions runner for guarded HML/platform Terraform workflows."
+  service_role           = aws_iam_role.private_eks_runner[0].arn
+  build_timeout          = 60
+  queued_timeout         = 30
+  concurrent_build_limit = 2
+
+  artifacts {
+    type = "NO_ARTIFACTS"
+  }
+
+  environment {
+    compute_type                = "BUILD_GENERAL1_MEDIUM"
+    image                       = "aws/codebuild/amazonlinux-x86_64-standard:5.0"
+    type                        = "LINUX_CONTAINER"
+    image_pull_credentials_type = "CODEBUILD"
+    privileged_mode             = false
+
+    environment_variable {
+      name  = "CODEBUILD_CONFIG_GITHUB_ACTIONS_ORG_REGISTRATION_NAME"
+      value = "Software-Architecture-Group-7-FIAP"
+    }
+
+    environment_variable {
+      name  = "CODEBUILD_CONFIG_GITHUB_ACTIONS_RUNNER_GROUP_ID"
+      value = tostring(var.github_runner_group_id)
+    }
+  }
+
+  source {
+    type            = "GITHUB"
+    location        = "https://github.com/Software-Architecture-Group-7-FIAP/k8s-infra"
+    git_clone_depth = 1
+
+    auth {
+      type     = "CODECONNECTIONS"
+      resource = var.github_codeconnection_arn
+    }
+  }
+
+  vpc_config {
+    vpc_id             = module.network.vpc_id
+    subnets            = module.network.workload_subnet_ids
+    security_group_ids = [aws_security_group.private_eks_runner.id]
+  }
+
+  logs_config {
+    cloudwatch_logs {
+      status     = "ENABLED"
+      group_name = aws_cloudwatch_log_group.private_eks_runner[0].name
+    }
+  }
+
+  tags = local.tags
+}
+
+resource "aws_codebuild_webhook" "private_eks_runner" {
+  count = var.enable_private_eks_runner ? 1 : 0
+
+  project_name = aws_codebuild_project.private_eks_runner[0].name
+  build_type   = "BUILD"
+
+  dynamic "filter_group" {
+    for_each = toset([
+      "^K8s HML Cluster Plan$",
+      "^K8s HML Cluster Apply$",
+      "^K8s HML Cluster Destroy$",
+    ])
+
+    content {
+      filter {
+        type    = "EVENT"
+        pattern = "WORKFLOW_JOB_QUEUED"
+      }
+
+      filter {
+        type    = "WORKFLOW_NAME"
+        pattern = filter_group.value
+      }
+    }
+  }
+
+  depends_on = [aws_codebuild_source_credential.private_eks_runner]
 }

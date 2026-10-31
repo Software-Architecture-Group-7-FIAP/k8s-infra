@@ -4,11 +4,33 @@ import os
 import unittest
 from unittest.mock import patch
 
-from consume_lifecycle_dispatch import AuthorizationError, _validate_dispatch_actor
+from consume_lifecycle_dispatch import AuthorizationError, _expected_action, _validate_dispatch_actor
 from require_trusted_lifecycle_operator import main as require_trusted_operator
 
 
 class LifecycleDispatchActorTests(unittest.TestCase):
+    def test_cluster_workflows_keep_the_open_and_close_actions_distinct(self) -> None:
+        self.assertEqual(
+            _expected_action("K8s HML Cluster Plan", {"operation": "open"}),
+            "open",
+        )
+        self.assertEqual(
+            _expected_action("K8s HML Cluster Apply", {"operation": "open"}),
+            "open",
+        )
+        self.assertEqual(
+            _expected_action("K8s HML Cluster Destroy", {"operation": "plan"}),
+            "close",
+        )
+        self.assertEqual(
+            _expected_action("K8s HML Cluster Destroy", {"operation": "destroy"}),
+            "close",
+        )
+
+    def test_cluster_workflows_reject_unrelated_lifecycle_operations(self) -> None:
+        with self.assertRaisesRegex(AuthorizationError, "allowed lifecycle action"):
+            _expected_action("K8s HML Cluster Apply", {"operation": "nat-disable"})
+
     def test_accepts_the_configured_dispatch_actor_bound_to_the_session_operator(self) -> None:
         authorization = {
             "dispatch_actor": "dispatch-bot[bot]",

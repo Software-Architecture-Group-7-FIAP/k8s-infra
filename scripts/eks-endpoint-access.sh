@@ -6,7 +6,7 @@ python_bin="${PYTHON_BIN:-python3}"
 mode="${1:-}"
 
 if [[ "$#" -ne 1 ]]; then
-  echo "Usage: $0 {add-runner|restore-admin|runner-allowed}" >&2
+  echo "Usage: $0 {add-runner|restore-admin|runner-allowed|private-runner-allowed}" >&2
   exit 2
 fi
 
@@ -33,6 +33,49 @@ except (ValueError, TypeError, json.JSONDecodeError) as exc:
 if any(runner_ip in network for network in networks):
     sys.exit(0)
 sys.exit(10)
+PY
+  exit
+fi
+
+if [[ "$mode" == "private-runner-allowed" ]]; then
+  cluster_json="$(aws eks describe-cluster --name "$cluster_name" --output json)"
+  if ! jq -e '.cluster.resourcesVpcConfig.endpointPrivateAccess == true' <<<"$cluster_json" >/dev/null; then
+    echo "The EKS cluster must have private endpoint access enabled for the VPC runner." >&2
+    exit 1
+  fi
+  endpoint_host="$(jq -r '.cluster.endpoint | sub("^https://"; "") | split("/")[0]' <<<"$cluster_json")"
+  if [[ -z "$endpoint_host" || "$endpoint_host" == "null" ]]; then
+    echo "The EKS cluster endpoint is missing." >&2
+    exit 1
+  fi
+  "$python_bin" - "$endpoint_host" <<'PY'
+import ipaddress
+import socket
+import sys
+
+host = sys.argv[1]
+try:
+    addresses = sorted({
+        ipaddress.ip_address(result[4][0])
+        for result in socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)
+    })
+    if not addresses or any(not address.is_private for address in addresses):
+        raise ValueError("the cluster endpoint did not resolve exclusively to private IPv4 addresses")
+    connected = False
+    for address in addresses:
+        try:
+            with socket.create_connection((str(address), 443), timeout=5):
+                connected = True
+                break
+        except OSError:
+            continue
+    if not connected:
+        raise OSError("TCP/443 to the private cluster endpoint is unreachable")
+except (OSError, ValueError) as exc:
+    print(f"Private EKS endpoint connectivity check failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+print("Private EKS endpoint resolved to a VPC address and accepted TCP/443.")
 PY
   exit
 fi

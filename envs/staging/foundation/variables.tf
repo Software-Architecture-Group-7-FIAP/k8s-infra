@@ -49,6 +49,37 @@ variable "cluster_endpoint_public_access_cidrs" {
   }
 }
 
+variable "enable_private_eks_runner" {
+  description = "Create the private VPC runner used only by coordinator-authorized HML/platform workflows."
+  type        = bool
+  default     = false
+}
+
+variable "github_runner_group_id" {
+  description = "ID of the organization runner group restricted to the three private cluster workflow files."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = !var.enable_private_eks_runner || (var.github_runner_group_id > 1 && floor(var.github_runner_group_id) == var.github_runner_group_id)
+    error_message = "Enabling the private EKS runner requires a custom integer GitHub organization runner-group ID greater than 1."
+  }
+}
+
+variable "github_codeconnection_arn" {
+  description = "ARN of an AVAILABLE GitHub CodeConnections connection authorized for the Software-Architecture-Group-7-FIAP organization."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = !var.enable_private_eks_runner || can(regex(
+      "^arn:aws:(codeconnections|codestar-connections):${var.aws_region}:035611741563:connection/[A-Za-z0-9-]+$",
+      var.github_codeconnection_arn
+    ))
+    error_message = "Enabling the private EKS runner requires a valid GitHub CodeConnections connection ARN."
+  }
+}
+
 variable "addon_versions" {
   description = "Pinned EKS add-on versions for Kubernetes 1.37 (checked 2026-10-25 with DescribeAddonVersions)."
   type        = map(string)

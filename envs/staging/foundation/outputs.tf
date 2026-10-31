@@ -13,6 +13,12 @@ output "ssm_parameters" {
   value       = module.contract.parameter_names
 }
 
+output "ssm_contract" {
+  description = "Sensitive-to-logs plain SSM contract payload used only by the post-apply verifier."
+  value       = module.contract.parameter_contract
+  sensitive   = true
+}
+
 output "internal_alb_listeners" {
   description = "Listener ARN per environment."
   value       = module.alb.listener_arns
