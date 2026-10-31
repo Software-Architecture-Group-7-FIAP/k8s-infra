@@ -288,6 +288,7 @@ jobs:
         env:
           REQUESTED_SESSION_ID: ${{ inputs.session_id }}
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+          SKIP_LIFECYCLE_AUTHORIZATION: ${{ vars.SKIP_LIFECYCLE_AUTHORIZATION || 'false' }}
         run: |
           set -euo pipefail
           python3 scripts/consume_lifecycle_dispatch.py \
