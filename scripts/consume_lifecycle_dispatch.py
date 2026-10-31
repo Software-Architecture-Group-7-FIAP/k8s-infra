@@ -169,6 +169,13 @@ def _canonical_input_hash(inputs: dict[str, str]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _canonical_target_ref(ref: Any) -> Any:
+    """Normalize GitHub's workflow_dispatch branch name for comparison with GITHUB_REF."""
+    if ref == "main":
+        return TARGET_REF
+    return ref
+
+
 def _expected_action(workflow: str, inputs: dict[str, str]) -> str:
     if workflow == "Orphan Audit":
         return "audit"
@@ -208,7 +215,7 @@ def _validate_target(
         or item.get("action") != action
         or item.get("target_repository") != TARGET_REPOSITORY
         or item.get("target_workflow") != workflow
-        or item.get("target_ref") != TARGET_REF
+        or _canonical_target_ref(item.get("target_ref")) != TARGET_REF
         or item.get("inputs_sha256") != input_hash
         or int(item.get("expires_at", 0)) <= now
     ):

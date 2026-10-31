@@ -4,7 +4,12 @@ import os
 import unittest
 from unittest.mock import patch
 
-from consume_lifecycle_dispatch import AuthorizationError, _expected_action, _validate_dispatch_actor
+from consume_lifecycle_dispatch import (
+    AuthorizationError,
+    _expected_action,
+    _validate_dispatch_actor,
+    _validate_target,
+)
 from require_trusted_lifecycle_operator import main as require_trusted_operator
 
 
@@ -113,6 +118,41 @@ class LifecycleDispatchActorTests(unittest.TestCase):
             clear=False,
         ), patch("sys.argv", ["require_trusted_lifecycle_operator.py"]):
             self.assertEqual(require_trusted_operator(), 1)
+
+
+class LifecycleDispatchTargetTests(unittest.TestCase):
+    def _validate(self, target_ref: str) -> None:
+        _validate_target(
+            {
+                "record_type": "authorization",
+                "status": "issued",
+                "stage": "hml",
+                "action": "open",
+                "target_repository": "Software-Architecture-Group-7-FIAP/k8s-infra",
+                "target_workflow": "CI",
+                "target_ref": target_ref,
+                "inputs_sha256": "a" * 64,
+                "expires_at": 200,
+                "session_id": "hml-2026-10-31",
+            },
+            session_id="hml-2026-10-31",
+            stage="hml",
+            action="open",
+            workflow="CI",
+            input_hash="a" * 64,
+            now=100,
+        )
+
+    def test_accepts_dispatch_branch_name_for_main(self) -> None:
+        self._validate("main")
+
+    def test_accepts_canonical_main_ref(self) -> None:
+        self._validate("refs/heads/main")
+
+    def test_rejects_another_branch_or_tag(self) -> None:
+        for target_ref in ("develop", "refs/heads/develop", "refs/tags/main"):
+            with self.subTest(target_ref=target_ref), self.assertRaises(AuthorizationError):
+                self._validate(target_ref)
 
 
 if __name__ == "__main__":
