@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+import consume_lifecycle_dispatch as lifecycle_consumer
 from consume_lifecycle_dispatch import (
     AuthorizationError,
+    _canonical_input_hash,
     _expected_action,
     _validate_dispatch_actor,
     _validate_target,
@@ -153,6 +158,64 @@ class LifecycleDispatchTargetTests(unittest.TestCase):
         for target_ref in ("develop", "refs/heads/develop", "refs/tags/main"):
             with self.subTest(target_ref=target_ref), self.assertRaises(AuthorizationError):
                 self._validate(target_ref)
+
+
+class LifecycleDispatchConsumeExpressionTests(unittest.TestCase):
+    def test_consume_aliases_reserved_action_attribute(self) -> None:
+        session_id = "hml-2026-10-31"
+        dispatch_id = "a" * 32
+        workflow = "CI"
+        inputs = {
+            "session_id": session_id,
+            "lifecycle_dispatch_id": dispatch_id,
+            "started_at": "2026-10-31T15:38:30Z",
+            "session_mode": "hml",
+            "stack": "foundation",
+            "operation": "open",
+            "enable_nat_gateway": "true",
+        }
+        authorization = {
+            "record_type": "authorization",
+            "status": "issued",
+            "stage": "hml",
+            "action": "open",
+            "target_repository": "Software-Architecture-Group-7-FIAP/k8s-infra",
+            "target_workflow": workflow,
+            "target_ref": "refs/heads/main",
+            "inputs_sha256": _canonical_input_hash(inputs),
+            "expires_at": 200,
+            "session_id": session_id,
+            "dispatch_actor": "trusted-operator",
+            "source_actor": "trusted-operator",
+        }
+        session_state = {"operator": "trusted-operator"}
+
+        with tempfile.TemporaryDirectory(prefix="lifecycle-dispatch-test-") as temporary_directory:
+            event_path = Path(temporary_directory) / "event.json"
+            event_path.write_text(json.dumps({"inputs": inputs}), encoding="utf-8")
+            environment = {
+                "GITHUB_RUN_ID": "12345",
+                "GITHUB_RUN_ATTEMPT": "1",
+                "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_REPOSITORY": "Software-Architecture-Group-7-FIAP/k8s-infra",
+                "GITHUB_WORKFLOW": workflow,
+                "GITHUB_REF": "refs/heads/main",
+                "GITHUB_EVENT_PATH": str(event_path),
+                "GITHUB_ACTOR": "trusted-operator",
+                "LIFECYCLE_TRIGGERING_ACTOR": "trusted-operator",
+                "LIFECYCLE_TRUSTED_OPERATORS": "trusted-operator",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch.object(lifecycle_consumer, "_get_item", side_effect=[authorization, session_state]),
+                patch.object(lifecycle_consumer, "_dynamodb") as dynamodb,
+                patch.object(lifecycle_consumer.time, "time", return_value=100),
+            ):
+                lifecycle_consumer.consume(session_id, dispatch_id, workflow)
+
+        update_request = dynamodb.call_args.args[1]
+        self.assertEqual(update_request["ExpressionAttributeNames"]["#action"], "action")
+        self.assertIn("#action = :action", update_request["ConditionExpression"])
 
 
 if __name__ == "__main__":
