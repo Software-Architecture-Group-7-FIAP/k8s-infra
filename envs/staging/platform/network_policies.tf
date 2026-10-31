@@ -134,39 +134,6 @@ resource "kubernetes_network_policy_v1" "pod_identity_agent" {
   }
 }
 
-# Limit HML/PRD migration Pods to the Pod Identity credential endpoint.
-resource "kubernetes_network_policy_v1" "migration_pod_identity_agent" {
-  for_each = local.app_namespaces
-
-  metadata {
-    name      = "allow-migration-pod-identity-agent"
-    namespace = kubernetes_namespace_v1.this[each.key].metadata[0].name
-  }
-
-  spec {
-    pod_selector {
-      match_labels = {
-        "app.kubernetes.io/name"      = "auto-shop-system"
-        "app.kubernetes.io/component" = "migrate"
-      }
-    }
-    policy_types = ["Egress"]
-
-    egress {
-      to {
-        ip_block {
-          cidr = "169.254.170.23/32"
-        }
-      }
-
-      ports {
-        protocol = "TCP"
-        port     = "80"
-      }
-    }
-  }
-}
-
 # App <-> Redis/MailHog stay inside the namespace. In auto-shop-ops this is also what allows a
 # migration/bootstrap Job's own components (if any) to talk to each other; hml and prd never reach
 # each other because each namespace only matches its own pods.

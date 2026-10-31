@@ -35,19 +35,28 @@ class EnvironmentIdentityContractTests(unittest.TestCase):
         self.assertIn('count = var.environment == "hml" ? 0 : 1', deployer_crd_role)
 
     def test_migration_roles_attach_each_database_contract_policy(self) -> None:
-        platform = (ROOT / "envs" / "staging" / "platform" / "db-migration-identity.tf").read_text(
-            encoding="utf-8"
-        )
+        # Migration identity is not shared in envs/staging/platform: each environment's own root
+        # (via the application-environment module) creates and owns its own role, so an HML pod
+        # can never assume the PRD role or vice versa.
+        platform = (ROOT / "envs" / "staging" / "platform").glob("*.tf")
+        platform_terraform = "\n".join(path.read_text(encoding="utf-8") for path in platform)
         environment = (ROOT / "modules" / "application-environment" / "main.tf").read_text(encoding="utf-8")
 
-        self.assertIn('migrations-${each.key}-read-policy-arn', platform)
-        self.assertIn('for_each = toset(local.app_environments)', platform)
-        self.assertIn('"auto-shop-staging-db-migrate-${each.key}"', platform)
-        self.assertIn('"auto-shop-${each.key}"', platform)
-        self.assertNotIn('owner-read-policy-arn', platform)
-        self.assertIn('db_migration_secret_read_policy_arn[each.key].value', platform)
-        self.assertIn('name = "auto-shop-staging-db-migrate-${var.environment}"', environment)
-        self.assertIn('role_arn        = data.aws_iam_role.db_migration.arn', environment)
+        self.assertNotIn("db_migration", platform_terraform)
+        self.assertIn(
+            'name = "/auto-shop/staging/database/iam/migrations-${var.environment}-read-policy-arn"',
+            environment,
+        )
+        self.assertIn('resource "aws_iam_role" "db_migration"', environment)
+        self.assertIn('aws:RequestTag/kubernetes-namespace"', environment)
+        self.assertIn('values   = ["auto-shop-${var.environment}"]', environment)
+        self.assertNotIn("owner-read-policy-arn", environment)
+        self.assertIn(
+            "policy_arn = data.aws_ssm_parameter.db_migration_secret_read_policy_arn.value",
+            environment,
+        )
+        self.assertIn('name                 = "auto-shop-staging-db-migrate-${var.environment}"', environment)
+        self.assertIn("role_arn        = aws_iam_role.db_migration.arn", environment)
 
     def test_new_environment_state_docs_preserve_existing_owners_and_closed_gates(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

@@ -10,8 +10,60 @@ data "aws_ssm_parameter" "alb_cidrs" {
   name = "/auto-shop/staging/network/alb-subnet-cidrs"
 }
 
-data "aws_iam_role" "db_migration" {
-  name = "auto-shop-staging-db-migrate-${var.environment}"
+data "aws_caller_identity" "current" {}
+
+data "aws_ssm_parameter" "db_migration_secret_read_policy_arn" {
+  name = "/auto-shop/staging/database/iam/migrations-${var.environment}-read-policy-arn"
+}
+
+# This environment's own migration role, trust policy, and database-owned read policy. The
+# namespace and service-account request tags prevent an HML pod from assuming the PRD role and
+# vice versa, even though both roles share the same cluster.
+data "aws_iam_policy_document" "db_migration_pod_identity_trust" {
+  statement {
+    actions = ["sts:AssumeRole", "sts:TagSession"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["pods.eks.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/kubernetes-namespace"
+      values   = ["auto-shop-${var.environment}"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/kubernetes-service-account"
+      values   = ["auto-shop-migration"]
+    }
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = ["arn:aws:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:cluster/${var.cluster_name}"]
+    }
+  }
+}
+
+resource "aws_iam_role" "db_migration" {
+  name                 = "auto-shop-staging-db-migrate-${var.environment}"
+  path                 = "/auto-shop/"
+  assume_role_policy   = data.aws_iam_policy_document.db_migration_pod_identity_trust.json
+  permissions_boundary = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/auto-shop/auto-shop-boundary"
+}
+
+resource "aws_iam_role_policy_attachment" "db_migration_secret_read" {
+  role       = aws_iam_role.db_migration.name
+  policy_arn = data.aws_ssm_parameter.db_migration_secret_read_policy_arn.value
 }
 
 locals {
@@ -136,6 +188,37 @@ resource "kubernetes_network_policy_v1" "default_deny" {
   spec {
     pod_selector {}
     policy_types = ["Ingress", "Egress"]
+  }
+}
+
+# Limit this environment's migration Pods to the Pod Identity credential endpoint.
+resource "kubernetes_network_policy_v1" "migration_pod_identity_agent" {
+  metadata {
+    name      = "allow-migration-pod-identity-agent"
+    namespace = local.namespace_name
+  }
+
+  spec {
+    pod_selector {
+      match_labels = {
+        "app.kubernetes.io/name"      = "auto-shop-system"
+        "app.kubernetes.io/component" = "migrate"
+      }
+    }
+    policy_types = ["Egress"]
+
+    egress {
+      to {
+        ip_block {
+          cidr = "169.254.170.23/32"
+        }
+      }
+
+      ports {
+        protocol = "TCP"
+        port     = "80"
+      }
+    }
   }
 }
 
@@ -351,7 +434,7 @@ resource "aws_eks_pod_identity_association" "db_migration" {
   cluster_name    = var.cluster_name
   namespace       = kubernetes_service_account_v1.db_migration.metadata[0].namespace
   service_account = kubernetes_service_account_v1.db_migration.metadata[0].name
-  role_arn        = data.aws_iam_role.db_migration.arn
+  role_arn        = aws_iam_role.db_migration.arn
   tags = {
     Environment         = var.environment
     KubernetesNamespace = local.namespace

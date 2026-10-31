@@ -96,19 +96,20 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
         plan_environments = variables.split('variable "plan_environments" {', maxsplit=1)[1].split(
             '\nvariable "plan_state_keys" {', maxsplit=1
         )[0]
-        self.assertIn('"k8s-infra" = ["staging"]', plan_environments)
-        self.assertNotIn('"database-infra"', plan_environments)
+        self.assertIn('"k8s-infra"      = ["staging"]', plan_environments)
+        self.assertIn('"database-infra" = ["aws-plan"]', plan_environments)
 
-        self.assertIn('repo == "auto-shop-system"', bootstrap)
-        self.assertIn('"repo:${var.github_org}/${repo}"', bootstrap)
+        variable_ids = variables.split('variable "github_repository_ids" {', maxsplit=1)[1].split(
+            "\n}", maxsplit=1
+        )[0]
+        self.assertIn('"database-infra"   = "1420971567"', variable_ids)
+        self.assertIn('"k8s-infra"        = "1431503198"', variable_ids)
+        self.assertIn('"lambda-auth"      = "1418895421"', variable_ids)
+        self.assertIn('"auto-shop-system" = "1221936756"', variable_ids)
         self.assertIn(
-            '"repo:${var.github_org}@${local.github_owner_id}/'
-            '${repo}@${local.repository_ids[repo]}"',
+            'repo => "repo:${var.github_org}@${var.github_org_id}/${repo}@${var.github_repository_ids[repo]}"',
             bootstrap,
         )
-        self.assertIn('"database-infra"   = "1420971567"', bootstrap)
-        self.assertIn('"k8s-infra"        = "1431503198"', bootstrap)
-        self.assertIn('"lambda-auth"      = "1418895421"', bootstrap)
         plan_trust = bootstrap.split('data "aws_iam_policy_document" "plan_trust" {', maxsplit=1)[
             1
         ].split("# Deploy role:", maxsplit=1)[0]

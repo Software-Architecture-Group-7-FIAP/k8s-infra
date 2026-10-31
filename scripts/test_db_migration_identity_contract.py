@@ -11,6 +11,9 @@ NAMESPACES_TF = (PLATFORM_DIR / "namespaces.tf").read_text(encoding="utf-8")
 NETWORK_POLICIES_TF = (PLATFORM_DIR / "network_policies.tf").read_text(
     encoding="utf-8"
 )
+APPLICATION_ENVIRONMENT_TF = (
+    REPO_ROOT / "modules/application-environment/main.tf"
+).read_text(encoding="utf-8")
 README = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
 
@@ -32,30 +35,49 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
         self.assertNotIn('"db_migration"', PLATFORM_TERRAFORM)
         self.assertNotIn("db_migration_", PLATFORM_TERRAFORM)
 
+    def test_each_environment_owns_its_own_migration_identity(self):
+        self.assertIn(
+            'resource "aws_iam_role" "db_migration"', APPLICATION_ENVIRONMENT_TF
+        )
+        self.assertIn(
+            'name                 = "auto-shop-staging-db-migrate-${var.environment}"',
+            APPLICATION_ENVIRONMENT_TF,
+        )
+        self.assertIn(
+            'name = "/auto-shop/staging/database/iam/migrations-${var.environment}-read-policy-arn"',
+            APPLICATION_ENVIRONMENT_TF,
+        )
+        self.assertIn(
+            'role_arn        = aws_iam_role.db_migration.arn', APPLICATION_ENVIRONMENT_TF
+        )
+
     def test_database_bootstrap_namespace_and_pod_identity_agent_access_remain(self):
-        self.assertIn('ops_namespace  = "auto-shop-ops"', NAMESPACES_TF)
+        self.assertIn('ops_namespace = "auto-shop-ops"', NAMESPACES_TF)
         self.assertIn(
             'resource "kubernetes_network_policy_v1" "pod_identity_agent" {',
             NETWORK_POLICIES_TF,
         )
-        self.assertIn("namespace = local.ops_namespace", NETWORK_POLICIES_TF)
+        self.assertIn(
+            "namespace = kubernetes_namespace_v1.this.metadata[0].name",
+            NETWORK_POLICIES_TF,
+        )
         self.assertIn("`gh-deploy-database-infra`", README)
         self.assertIn("Edit em `auto-shop-ops` (Job de bootstrap de banco)", README)
 
     def test_only_migration_pods_in_each_app_namespace_can_reach_pod_identity_agent(
         self,
     ):
+        # The HML/PRD namespaces are no longer created by the shared platform root (each
+        # environment's own Terraform root owns its namespace instead), so this policy now lives
+        # once per environment in the application-environment module, not for_each in platform.
+        self.assertNotIn("migration_pod_identity_agent", NETWORK_POLICIES_TF)
         marker = 'resource "kubernetes_network_policy_v1" "migration_pod_identity_agent" {'
-        self.assertIn(marker, NETWORK_POLICIES_TF)
-        migration_policy = NETWORK_POLICIES_TF.split(marker, maxsplit=1)[1].split(
-            "\nresource ", maxsplit=1
-        )[0]
+        self.assertIn(marker, APPLICATION_ENVIRONMENT_TF)
+        migration_policy = APPLICATION_ENVIRONMENT_TF.split(marker, maxsplit=1)[
+            1
+        ].split("\nresource ", maxsplit=1)[0]
 
-        self.assertIn("for_each = local.app_namespaces", migration_policy)
-        self.assertIn(
-            "namespace = kubernetes_namespace_v1.this[each.key].metadata[0].name",
-            migration_policy,
-        )
+        self.assertIn("namespace = local.namespace_name", migration_policy)
         self.assertIn(
             '"app.kubernetes.io/name"      = "auto-shop-system"', migration_policy
         )
