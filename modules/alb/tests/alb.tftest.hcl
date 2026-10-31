@@ -15,7 +15,6 @@ mock_provider "aws" {
 variables {
   name                   = "auto-shop-staging"
   vpc_id                 = "vpc-0123456789abcdef0"
-  vpc_cidr               = "10.80.0.0/20"
   subnet_ids             = ["subnet-aaaa", "subnet-bbbb"]
   node_security_group_id = "sg-0nodes"
   app_port               = 8000
@@ -58,12 +57,12 @@ run "one_listener_and_ip_target_group_per_environment" {
   }
 }
 
-run "alb_reachable_only_from_vpc_and_nodes_only_from_alb" {
+run "alb_ingress_is_owned_by_vpc_link_stack_and_nodes_only_accept_alb" {
   command = apply
 
   assert {
-    condition     = alltrue([for r in aws_vpc_security_group_ingress_rule.alb_listener : r.cidr_ipv4 == "10.80.0.0/20"])
-    error_message = "ALB listeners must only accept traffic from inside the VPC (VPC Link ENIs)."
+    condition     = length(aws_security_group.alb.ingress) == 0
+    error_message = "The ALB module must not add CIDR ingress; the application stack owns VPC Link SG ingress."
   }
 
   assert {

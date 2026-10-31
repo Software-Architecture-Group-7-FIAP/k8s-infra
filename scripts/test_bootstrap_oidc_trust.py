@@ -25,6 +25,11 @@ class BootstrapOidcTrustTests(unittest.TestCase):
                     rf'"{re.escape(repository)}"\s*=\s*"{repository_id}"',
                 )
 
+    def test_repo_subject_local_is_built_from_the_fixed_repository_ids(self):
+        locals_block = MAIN_TF.split("locals {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("var.github_org_id", locals_block)
+        self.assertIn("var.github_repository_ids[repo]", locals_block)
+
     def test_all_oidc_trusts_use_exact_subject_equality(self):
         trust_documents = (
             "plan_trust",
@@ -41,7 +46,7 @@ class BootstrapOidcTrustTests(unittest.TestCase):
                 self.assertIn('test     = "StringEquals"', section)
                 self.assertNotIn('test     = "StringLike"', section)
                 self.assertNotIn("@*/", section)
-                self.assertIn("var.github_repository_ids[", section)
+                self.assertIn("local.repo_subject[", section)
 
     def test_database_plan_role_is_limited_to_main_and_protected_plan_environment(self):
         plan_environments = VARIABLES_TF.split('variable "plan_environments"', 1)[1]

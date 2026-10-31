@@ -28,6 +28,9 @@ resource "aws_ecr_registry_scanning_configuration" "this" {
 resource "aws_ecr_lifecycle_policy" "auto_shop_system" {
   repository = aws_ecr_repository.auto_shop_system.name
 
+  # Rollback uses the previously deployed digest. Keep immutable sha-* tagged images available;
+  # only untagged copies are disposable after one day. Beyond the ten most recent commit-tagged
+  # images, older ones are no longer reachable by any rollback target and are pruned too.
   policy = jsonencode({
     rules = [
       {

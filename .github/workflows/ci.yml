@@ -3,7 +3,7 @@ run-name: ${{ inputs.session_id || github.event.pull_request.number || github.ru
 
 on:
   pull_request:
-    branches: [main]
+    branches: [develop, main]
   workflow_dispatch:
     inputs:
       session_id:
@@ -21,10 +21,6 @@ on:
         options:
           - hml
           - prd-window
-      session_token:
-        description: Coordinator-signed authorization for this exact session context
-        required: true
-        type: string
       lifecycle_dispatch_id:
         description: Coordinator correlation ID for this workflow dispatch
         required: true
@@ -36,6 +32,8 @@ on:
         options:
           - foundation
           - platform
+          - hml
+          - production
       operation:
         description: Open the session or disable only the shared NAT and its routes
         required: true
@@ -57,6 +55,7 @@ env:
   TF_VERSION: 1.15.8
   TF_IN_AUTOMATION: "true"
   EXPECTED_AWS_ACCOUNT_ID: "035611741563"
+  LIFECYCLE_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
   TF_VAR_cluster_endpoint_public_access_cidrs: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
 
 jobs:
@@ -106,7 +105,7 @@ jobs:
 
       - name: terraform validate (stacks, no backend)
         run: |
-          for dir in envs/staging/*/; do
+          for dir in envs/staging/*/ envs/hml/ envs/production/; do
             echo "::group::validate $dir"
             terraform -chdir="$dir" init -backend=false -input=false >/dev/null
             terraform -chdir="$dir" validate
@@ -178,7 +177,6 @@ jobs:
           REQUESTED_SESSION_ID: ${{ inputs.session_id }}
           REQUESTED_STARTED_AT: ${{ inputs.started_at }}
           REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
-          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
           REQUESTED_STACK: ${{ inputs.stack }}
           REQUESTED_OPERATION: ${{ inputs.operation }}
@@ -186,26 +184,37 @@ jobs:
           STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
           STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
           AUTHORIZED_SESSION_MODE: ${{ vars.STAGING_SESSION_MODE }}
-          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
           ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED || 'false' }}
           PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY || 'false' }}
           PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED || 'false' }}
+          K8S_HML_TERRAFORM_ROOT_READY: ${{ vars.K8S_HML_TERRAFORM_ROOT_READY || 'false' }}
+          K8S_PRODUCTION_TERRAFORM_ROOT_READY: ${{ vars.K8S_PRODUCTION_TERRAFORM_ROOT_READY || 'false' }}
         run: |
           set -euo pipefail
-          if [[ -n "$REQUESTED_SESSION_TOKEN" ]]; then
-            echo "::add-mask::$REQUESTED_SESSION_TOKEN"
-          fi
           if [[ -n "$REQUESTED_LIFECYCLE_DISPATCH_ID" && ! "$REQUESTED_LIFECYCLE_DISPATCH_ID" =~ ^[0-9a-f]{32}$ ]]; then
             echo "::error::The lifecycle dispatch ID must be 32 lowercase hexadecimal characters."
             exit 1
           fi
           case "$REQUESTED_STACK" in
-            foundation|platform) ;;
+            foundation|platform|hml|production) ;;
             *) echo "::error::Unsupported Terraform stack."; exit 1 ;;
           esac
           case "$REQUESTED_OPERATION" in
             open)
+              case "$REQUESTED_STACK" in
+                hml)
+                  if [[ "$K8S_HML_TERRAFORM_ROOT_READY" != "true" || "$REQUESTED_SESSION_MODE" != "hml" ]]; then
+                    echo "::error::The HML root is gated until its isolated state is reviewed and ready, and requires an HML session."
+                    exit 1
+                  fi
+                  ;;
+                production)
+                  if [[ "$K8S_PRODUCTION_TERRAFORM_ROOT_READY" != "true" || "$REQUESTED_SESSION_MODE" != "prd-window" ]]; then
+                    echo "::error::The production root is gated until its isolated state is reviewed and ready, and requires a PRD window."
+                    exit 1
+                  fi
+                  ;;
+              esac
               if [[ "$REQUESTED_SESSION_MODE" != "$AUTHORIZED_SESSION_MODE" ]]; then
                 echo "::error::The requested session mode does not match the protected Environment authorization."
                 exit 1
@@ -253,6 +262,31 @@ jobs:
             exit 1
           fi
 
+      - name: Require a trusted lifecycle actor before AWS credentials
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          LIFECYCLE_TRUSTED_OPERATORS: ${{ vars.LIFECYCLE_TRUSTED_OPERATORS || '' }}
+        run: python3 scripts/require_trusted_lifecycle_operator.py
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        name: Assume the dedicated lifecycle authorization consumer role
+        with:
+          role-to-assume: arn:aws:iam::${{ env.EXPECTED_AWS_ACCOUNT_ID }}:role/auto-shop/auto-shop-staging-github-lifecycle-consumer-k8s-ci
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 900
+          role-session-name: lifecycle-consumer-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Consume the one-use CI dispatch authorization
+        env:
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/consume_lifecycle_dispatch.py \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
+            --workflow "CI"
+
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ env.TF_VERSION }}
@@ -288,7 +322,7 @@ jobs:
         run: bash scripts/validate_plan_bucket.sh
 
       - name: Require runner access before planning the platform stack
-        if: inputs.stack == 'platform'
+        if: inputs.stack == 'platform' || inputs.stack == 'hml' || inputs.stack == 'production'
         run: |
           set +e
           bash scripts/eks-endpoint-access.sh runner-allowed
@@ -310,11 +344,10 @@ jobs:
           SESSION_MODE: ${{ inputs.session_mode }}
           PLAN_SCOPE: ${{ inputs.operation }}
           ENABLE_NAT_GATEWAY: ${{ inputs.enable_nat_gateway }}
-          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
           REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
           set -euo pipefail
+          terraform_root="$(python3 scripts/terraform_root.py "$STACK")"
           umask 077
           plan_dir="$(mktemp -d)"
           trap 'rm -rf -- "$plan_dir"' EXIT
@@ -323,22 +356,22 @@ jobs:
           plan_json="$plan_dir/plan.json"
           manifest_file="$plan_dir/manifest.json"
 
-          terraform -chdir="envs/staging/$STACK" init -input=false
+          terraform -chdir="$terraform_root" init -input=false
           if [[ "$STACK" == "foundation" ]]; then
-            terraform -chdir="envs/staging/$STACK" plan \
+            terraform -chdir="$terraform_root" plan \
               -var="enable_nat_gateway=$ENABLE_NAT_GATEWAY" \
               -input=false \
               -lock=false \
               -no-color \
               -out="$plan_file" >/dev/null
           else
-            terraform -chdir="envs/staging/$STACK" plan \
+            terraform -chdir="$terraform_root" plan \
               -input=false \
               -lock=false \
               -no-color \
               -out="$plan_file" >/dev/null
           fi
-          terraform -chdir="envs/staging/$STACK" show -json "$plan_file" > "$plan_json"
+          terraform -chdir="$terraform_root" show -json "$plan_file" > "$plan_json"
           if [[ "$STACK" == "foundation" ]]; then
             bash scripts/validate-eks-endpoint-plan.sh "$plan_json"
           fi
@@ -393,7 +426,7 @@ jobs:
           plan_base_key="k8s-infra/staging/plans/$plan_id/apply"
           aws s3api put-object \
             --bucket auto-shop-tfstate-035611741563-use1 \
-            --key "$plan_base_key/manifest.json" \
+            --key "$plan_base_key/manifest-$STACK.json" \
             --body "$manifest_file" \
             --region "$REQUESTED_AWS_REGION" \
             --server-side-encryption AES256 \

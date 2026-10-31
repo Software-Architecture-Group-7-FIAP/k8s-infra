@@ -6,7 +6,7 @@ PLAN_FILE="${1:?usage: plan-summary.sh PLAN_FILE STACK_NAME}"
 STACK_NAME="${2:?usage: plan-summary.sh PLAN_FILE STACK_NAME}"
 
 case "$STACK_NAME" in
-  foundation|platform) ;;
+  foundation|platform|hml|production) ;;
   *) echo "Unsupported stack: $STACK_NAME" >&2; exit 2 ;;
 esac
 

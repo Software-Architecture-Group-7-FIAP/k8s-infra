@@ -132,6 +132,26 @@ module "eks" {
           }
         }
       }
+      hml-infrastructure = {
+        principal_arn     = "${local.role_arn}/gh-deploy-k8s-hml"
+        kubernetes_groups = ["auto-shop-hml-infra"]
+        policy_associations = {
+          namespace_admin = {
+            policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy"
+            access_scope = { type = "namespace", namespaces = ["auto-shop-hml"] }
+          }
+        }
+      }
+      hml-app-deploy = {
+        principal_arn     = "arn:aws:iam::035611741563:role/auto-shop-staging-github-staging"
+        kubernetes_groups = ["auto-shop-deployers"]
+        policy_associations = {
+          edit = {
+            policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
+            access_scope = { type = "namespace", namespaces = ["auto-shop-hml"] }
+          }
+        }
+      }
       database-deploy = {
         principal_arn = "${local.role_arn}/gh-deploy-database-infra"
         policy_associations = {
@@ -175,6 +195,35 @@ module "eks" {
     metrics-server = {
       addon_version = var.addon_versions["metrics-server"]
       most_recent   = false
+    }
+    amazon-cloudwatch-observability = {
+      addon_version = data.aws_eks_addon_version.cloudwatch_observability.version
+      most_recent   = false
+      namespace_config = {
+        namespace = "amazon-cloudwatch"
+      }
+      pod_identity_association = [{
+        role_arn        = aws_iam_role.cloudwatch_observability.arn
+        service_account = "cloudwatch-agent"
+      }]
+      configuration_values = jsonencode({
+        containerLogs = {
+          enabled = false
+        }
+        containerInsights = {
+          enabled = false
+        }
+        otelContainerInsights = {
+          enabled = true
+        }
+        manager = {
+          applicationSignals = {
+            autoMonitor = {
+              monitorAllServices = false
+            }
+          }
+        }
+      })
     }
   }
 
@@ -234,9 +283,8 @@ module "eks" {
 module "alb" {
   source = "../../../modules/alb"
 
-  name     = var.name
-  vpc_id   = module.network.vpc_id
-  vpc_cidr = module.network.vpc_cidr
+  name   = var.name
+  vpc_id = module.network.vpc_id
   # Dedicated subnets (not shared with node/Pod ENIs) so the platform stack's NetworkPolicy can
   # narrow ALB-to-Pod ingress to exactly these two CIDRs instead of the whole VPC — otherwise any
   # pod, not just the ALB, would match an "allow from the VPC" rule.

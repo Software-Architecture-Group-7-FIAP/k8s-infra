@@ -1,11 +1,8 @@
-import hashlib
-import hmac
 import unittest
 from datetime import datetime, timezone
 
 from validate_staging_session import (
     StagingSessionError,
-    _verify_session_token,
     validate_staging_session,
 )
 
@@ -44,7 +41,7 @@ class ValidateStagingSessionTests(unittest.TestCase):
         remaining = self.validate(
             active="false",
             authorized="false",
-            now=datetime(2026, 10, 28, 15, 30, tzinfo=timezone.utc),
+            now=datetime(2026, 10, 29, 1, 30, tzinfo=timezone.utc),
             operation="teardown",
         )
 
@@ -107,15 +104,16 @@ class ValidateStagingSessionTests(unittest.TestCase):
     def test_hml_teardown_is_allowed_only_before_its_reserved_deadline(self) -> None:
         remaining = self.validate(
             active="false",
-            now=datetime(2026, 10, 28, 15, 30, tzinfo=timezone.utc),
+            now=datetime(2026, 10, 29, 1, 30, tzinfo=timezone.utc),
             operation="teardown",
         )
 
         self.assertEqual(remaining.total_seconds(), 10 * 60)
 
-    def test_hml_cleanup_is_rejected_before_session_end(self) -> None:
-        with self.assertRaisesRegex(StagingSessionError, "cannot start before"):
-            self.validate(operation="teardown")
+    def test_hml_teardown_can_start_before_session_expiry(self) -> None:
+        remaining = self.validate(operation="teardown")
+
+        self.assertEqual(remaining.total_seconds(), 13 * 60 * 60 + 40 * 60)
 
     def test_hml_teardown_is_rejected_when_the_audit_reserve_opens(self) -> None:
         with self.assertRaisesRegex(StagingSessionError, "stop 20 minutes before"):
@@ -139,7 +137,7 @@ class ValidateStagingSessionTests(unittest.TestCase):
             mode="prd-window",
         )
 
-        self.assertEqual(remaining.total_seconds(), 13 * 60 * 60)
+        self.assertEqual(remaining.total_seconds(), 2 * 60 * 60)
 
     def test_prd_window_accepts_the_last_delivery_date(self) -> None:
         remaining = validate_staging_session(
@@ -151,7 +149,7 @@ class ValidateStagingSessionTests(unittest.TestCase):
             mode="prd-window",
         )
 
-        self.assertEqual(remaining.total_seconds(), 16 * 60 * 60)
+        self.assertEqual(remaining.total_seconds(), 5 * 60 * 60)
 
     def test_prd_window_requires_exact_06_brt_start(self) -> None:
         with self.assertRaisesRegex(StagingSessionError, "exactly 06:00 America/Sao_Paulo"):
@@ -180,13 +178,24 @@ class ValidateStagingSessionTests(unittest.TestCase):
                     )
 
     def test_prd_work_is_rejected_at_22_brt(self) -> None:
-        with self.assertRaisesRegex(StagingSessionError, "ended at 22:00"):
+        with self.assertRaisesRegex(StagingSessionError, "five-hour limit"):
             validate_staging_session(
                 active="true",
                 authorized="true",
                 session_id="prd-2026-11-01",
                 started_at="2026-11-01T09:00:00Z",
                 now=datetime(2026, 11, 2, 1, 0, tzinfo=timezone.utc),
+                mode="prd-window",
+            )
+
+    def test_prd_work_is_rejected_at_the_five_hour_limit(self) -> None:
+        with self.assertRaisesRegex(StagingSessionError, "five-hour limit"):
+            validate_staging_session(
+                active="true",
+                authorized="true",
+                session_id="prd-2026-11-01",
+                started_at="2026-11-01T09:00:00Z",
+                now=datetime(2026, 11, 1, 14, 0, tzinfo=timezone.utc),  # 11:00 BRT
                 mode="prd-window",
             )
 
@@ -197,7 +206,7 @@ class ValidateStagingSessionTests(unittest.TestCase):
                 authorized="true",
                 session_id="prd-2026-11-01",
                 started_at="2026-11-01T09:00:00Z",
-                now=datetime(2026, 11, 2, 0, 30, tzinfo=timezone.utc),  # 21:30 BRT
+                now=datetime(2026, 11, 1, 13, 30, tzinfo=timezone.utc),  # 10:30 BRT
                 mode="prd-window",
                 minimum_remaining_seconds=30 * 60 + 1,
             )
@@ -282,54 +291,9 @@ class ValidateStagingSessionTests(unittest.TestCase):
         with self.assertRaisesRegex(StagingSessionError, "remaining authorized lifecycle time"):
             self.validate(
                 active="false",
-                now=datetime(2026, 10, 28, 15, 30, tzinfo=timezone.utc),
+                now=datetime(2026, 10, 29, 1, 30, tzinfo=timezone.utc),
                 operation="teardown",
                 minimum_remaining_seconds=10 * 60 + 1,
-            )
-
-    def test_session_token_is_bound_to_its_session_context(self) -> None:
-        key = "0123456789abcdef0123456789abcdef"
-        mode = "hml"
-        session_id = self.session_id
-        started_at = self.started_at
-        message = f"{mode}|{session_id}|{started_at}".encode("utf-8")
-        token = hmac.new(key.encode("utf-8"), message, hashlib.sha256).hexdigest()
-
-        _verify_session_token(
-            session_token=token,
-            signing_key=key,
-            mode=mode,
-            session_id=session_id,
-            started_at=started_at,
-        )
-
-        with self.assertRaisesRegex(StagingSessionError, "does not authorize this context"):
-            _verify_session_token(
-                session_token=token,
-                signing_key=key,
-                mode="prd-window",
-                session_id=session_id,
-                started_at=started_at,
-            )
-
-    def test_session_token_requires_a_strong_signing_key(self) -> None:
-        with self.assertRaisesRegex(StagingSessionError, "at least 32 bytes"):
-            _verify_session_token(
-                session_token="0" * 64,
-                signing_key="too-short",
-                mode="hml",
-                session_id=self.session_id,
-                started_at=self.started_at,
-            )
-
-    def test_session_token_requires_lowercase_sha256_hex(self) -> None:
-        with self.assertRaisesRegex(StagingSessionError, "valid lifecycle session token"):
-            _verify_session_token(
-                session_token="G" * 64,
-                signing_key="0123456789abcdef0123456789abcdef",
-                mode="hml",
-                session_id=self.session_id,
-                started_at=self.started_at,
             )
 
     def test_rejects_unknown_mode_and_operation(self) -> None:

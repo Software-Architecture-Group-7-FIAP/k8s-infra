@@ -29,7 +29,14 @@ class TerraformPlanArtifactTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_directory.cleanup()
 
-    def create(self, *, plan_id: str = "123456-1") -> None:
+    def create(
+        self,
+        *,
+        plan_id: str = "123456-1",
+        stack: str = "foundation",
+        session_mode: str = "hml",
+        scope: str = "open",
+    ) -> None:
         create_manifest(
             Namespace(
                 plan_id=plan_id,
@@ -39,13 +46,22 @@ class TerraformPlanArtifactTests(unittest.TestCase):
                 commit_sha="a" * 40,
                 session_id="phase-3-session",
                 session_started_at=self.session_started_at,
+                session_mode=session_mode,
+                scope=scope,
                 terraform_version="1.15.8",
                 output=str(self.manifest_file),
-                plan=[f"foundation={self.plan_file}"],
+                plan=[f"{stack}={self.plan_file}"],
             )
         )
 
-    def verify(self, *, plan_id: str = "123456-1", stack: str = "foundation") -> None:
+    def verify(
+        self,
+        *,
+        plan_id: str = "123456-1",
+        stack: str = "foundation",
+        session_mode: str = "hml",
+        scope: str = "open",
+    ) -> None:
         verify_manifest(
             Namespace(
                 manifest=str(self.manifest_file),
@@ -58,6 +74,8 @@ class TerraformPlanArtifactTests(unittest.TestCase):
                 commit_sha="a" * 40,
                 session_id="phase-3-session",
                 session_started_at=self.session_started_at,
+                session_mode=session_mode,
+                scope=scope,
                 terraform_version="1.15.8",
             )
         )
@@ -70,6 +88,47 @@ class TerraformPlanArtifactTests(unittest.TestCase):
         self.assertEqual(manifest["aws_region"], "us-east-1")
         self.assertEqual(set(manifest["plans"]), {"foundation"})
         self.verify()
+
+    def test_hml_root_plan_round_trip_uses_its_own_stack_name(self) -> None:
+        self.create(stack="hml")
+
+        manifest = json.loads(self.manifest_file.read_text(encoding="utf-8"))
+        self.assertEqual(set(manifest["plans"]), {"hml"})
+        self.verify(stack="hml")
+
+    def test_hml_root_can_use_the_isolated_all_destroy_scope(self) -> None:
+        create_manifest(
+            Namespace(
+                plan_id="123456-1",
+                purpose="destroy",
+                aws_account_id="035611741563",
+                aws_region="us-east-1",
+                commit_sha="a" * 40,
+                session_id="phase-3-session",
+                session_started_at=self.session_started_at,
+                session_mode="hml",
+                scope="all",
+                terraform_version="1.15.8",
+                output=str(self.manifest_file),
+                plan=[f"hml={self.plan_file}"],
+            )
+        )
+
+        manifest = json.loads(self.manifest_file.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["scope"], "all")
+        self.assertEqual(set(manifest["plans"]), {"hml"})
+
+    def test_production_root_requires_a_prd_window(self) -> None:
+        with self.assertRaisesRegex(PlanArtifactError, "production root requires session_mode=prd-window"):
+            self.create(stack="production")
+
+    def test_production_root_plan_round_trip_uses_a_prd_window(self) -> None:
+        self.create(stack="production", session_mode="prd-window")
+
+        manifest = json.loads(self.manifest_file.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["session_mode"], "prd-window")
+        self.assertEqual(set(manifest["plans"]), {"production"})
+        self.verify(stack="production", session_mode="prd-window")
 
     def test_rejects_a_changed_plan_file(self) -> None:
         self.create()

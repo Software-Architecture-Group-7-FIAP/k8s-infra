@@ -12,10 +12,6 @@ on:
         description: Coordinator-provided UTC session start, YYYY-MM-DDTHH:MM:SSZ
         required: true
         type: string
-      session_token:
-        description: Coordinator-signed authorization for this exact session context
-        required: true
-        type: string
       lifecycle_dispatch_id:
         description: Coordinator correlation ID for this workflow dispatch
         required: true
@@ -39,6 +35,7 @@ concurrency:
 
 env:
   EXPECTED_AWS_ACCOUNT_ID: "035611741563"
+  LIFECYCLE_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
   PLAN_BUCKET: auto-shop-tfstate-035611741563-use1
 
 jobs:
@@ -64,15 +61,9 @@ jobs:
           REQUESTED_SESSION_ID: ${{ inputs.session_id }}
           REQUESTED_STARTED_AT: ${{ inputs.started_at }}
           REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
-          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
-          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
         run: |
           set -euo pipefail
-          if [[ -n "$REQUESTED_SESSION_TOKEN" ]]; then
-            echo "::add-mask::$REQUESTED_SESSION_TOKEN"
-          fi
           if [[ -n "$REQUESTED_LIFECYCLE_DISPATCH_ID" && ! "$REQUESTED_LIFECYCLE_DISPATCH_ID" =~ ^[0-9a-f]{32}$ ]]; then
             echo "::error::The lifecycle dispatch ID must be 32 lowercase hexadecimal characters."
             exit 1
@@ -108,6 +99,30 @@ jobs:
             exit 1
           fi
 
+      - name: Require a trusted lifecycle actor before AWS credentials
+        env:
+          LIFECYCLE_TRUSTED_OPERATORS: ${{ vars.LIFECYCLE_TRUSTED_OPERATORS || '' }}
+        run: python3 scripts/require_trusted_lifecycle_operator.py
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        name: Assume the dedicated lifecycle authorization consumer role
+        with:
+          role-to-assume: arn:aws:iam::${{ env.EXPECTED_AWS_ACCOUNT_ID }}:role/auto-shop/auto-shop-staging-github-lifecycle-consumer-k8s-orphan-audit
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 900
+          role-session-name: lifecycle-consumer-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Consume the one-use orphan-audit dispatch authorization
+        env:
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/consume_lifecycle_dispatch.py \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
+            --workflow "Orphan Audit"
+
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_AUDIT_ROLE_ARN }}
@@ -130,7 +145,7 @@ jobs:
             echo "- Account: $account_id"
             echo "- Region: $REQUESTED_AWS_REGION"
             echo "- Session: $SESSION_ID"
-            echo "- Reads foundation/platform state addresses and dynamic AWS resource inventories."
+            echo "- Reads foundation, platform, HML, and production state addresses and dynamic AWS resource inventories."
             echo "- VPC, subnets, and persistent SSM contract resources are allowed to remain."
             echo "- EKS, ALB, NAT, RDS, compute, storage, and session log resources must be absent."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -145,8 +160,12 @@ jobs:
           chmod 700 "$audit_dir"
           trap 'rm -rf -- "$audit_dir"' EXIT
 
-          for stack in foundation platform; do
-            state_key="k8s-infra/staging/$stack.tfstate"
+          for stack in foundation platform hml production; do
+            case "$stack" in
+              foundation|platform) state_key="k8s-infra/staging/$stack.tfstate" ;;
+              hml) state_key="k8s-infra/hml/terraform.tfstate" ;;
+              production) state_key="k8s-infra/production/terraform.tfstate" ;;
+            esac
             present_key="$(aws s3api list-objects-v2 \
               --bucket "$PLAN_BUCKET" \
               --prefix "$state_key" \
@@ -172,6 +191,8 @@ jobs:
           python3 scripts/verify_session_state.py \
             --foundation-state "$audit_dir/foundation-state.json" \
             --platform-state "$audit_dir/platform-state.json" \
+            --hml-state "$audit_dir/hml-state.json" \
+            --production-state "$audit_dir/production-state.json" \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Audit dynamic AWS resources with read-only APIs
@@ -180,8 +201,6 @@ jobs:
           SESSION_ID: ${{ inputs.session_id }}
           SESSION_STARTED_AT: ${{ inputs.started_at }}
           SESSION_MODE: ${{ inputs.session_mode }}
-          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
           STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
           STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
         run: |
