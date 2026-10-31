@@ -196,6 +196,7 @@ jobs:
           PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED || 'false' }}
           K8S_HML_TERRAFORM_ROOT_READY: ${{ vars.K8S_HML_TERRAFORM_ROOT_READY || 'false' }}
           K8S_PRODUCTION_TERRAFORM_ROOT_READY: ${{ vars.K8S_PRODUCTION_TERRAFORM_ROOT_READY || 'false' }}
+          STAGING_SESSION_ALLOW_ANY_TIME: ${{ vars.STAGING_SESSION_ALLOW_ANY_TIME || 'false' }}
         run: |
           set -euo pipefail
           if [[ -n "$REQUESTED_LIFECYCLE_DISPATCH_ID" && ! "$REQUESTED_LIFECYCLE_DISPATCH_ID" =~ ^[0-9a-f]{32}$ ]]; then
