@@ -275,11 +275,11 @@ def consume(session_id: str, dispatch_id: str, workflow: str) -> None:
                 ),
                 "ConditionExpression": (
                     "#status = :issued AND record_type = :record_type "
-                    "AND expires_at > :now AND stage = :stage AND action = :action "
+                    "AND expires_at > :now AND stage = :stage AND #action = :action "
                     "AND target_repository = :repository AND target_workflow = :workflow "
                     "AND target_ref = :ref AND inputs_sha256 = :input_hash AND dispatch_actor = :dispatch_actor"
                 ),
-                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeNames": {"#status": "status", "#action": "action"},
                 "ExpressionAttributeValues": {
                     ":consumed": _string("consumed"),
                     ":issued": _string("issued"),
