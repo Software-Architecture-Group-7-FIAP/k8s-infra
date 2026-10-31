@@ -41,30 +41,9 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
 
         expected_deploy_environments = {
             "k8s-infra": '["staging"]',
-            "database-infra": '["staging", "hml", "production"]',
-            "lambda-auth": '["hml", "prd"]',
+            "database-infra": '["staging"]',
+            "lambda-auth": '["prd"]',
             "auto-shop-system": '["hml", "prd"]',
-        }
-        expected_deploy_workflows = {
-            "k8s-infra": (
-                ("staging", "Apply", "refs/heads/main"),
-                ("staging", "Destroy", "refs/heads/main"),
-            ),
-            "database-infra": (
-                ("staging", "Apply database staging", "refs/heads/main"),
-                ("staging", "Destroy database staging", "refs/heads/main"),
-                ("hml", "Database infrastructure delivery", "refs/heads/develop"),
-                ("production", "Database infrastructure delivery", "refs/heads/main"),
-            ),
-            "lambda-auth": (
-                ("hml", "Promote lambda-auth", "refs/heads/main"),
-                ("prd", "Promote lambda-auth", "refs/heads/main"),
-            ),
-            "auto-shop-system": (
-                ("hml", "CD Staging", "refs/heads/develop"),
-                ("prd", "CD Production", "refs/heads/main"),
-                ("prd", "Lifecycle ledger bootstrap", "refs/heads/main"),
-            ),
         }
         repositories = variables.split('variable "repositories" {', maxsplit=1)[1]
         for repository, environments in expected_deploy_environments.items():
@@ -75,21 +54,18 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
                 self.assertIn(
                     f"deploy_environments = {environments}", repository_config
                 )
-                for environment, workflow, ref in expected_deploy_workflows[repository]:
-                    self.assertIn(
-                        f'{{ environment = "{environment}", workflow = "{workflow}", ref = "{ref}"',
-                        repository_config,
-                    )
+
+        database_repository_config = repositories.split('"database-infra" = {', maxsplit=1)[1].split(
+            "\n    }", maxsplit=1
+        )[0]
+        self.assertNotIn('"hml"', database_repository_config)
+        self.assertNotIn('"production"', database_repository_config)
+        self.assertNotIn("Database infrastructure delivery", database_repository_config)
 
         k8s_repository_config = repositories.split('"k8s-infra" = {', maxsplit=1)[1].split(
             "\n    }", maxsplit=1
         )[0]
-        expected_k8s_workflow_refs = (
-            "Software-Architecture-Group-7-FIAP/k8s-infra/.github/workflows/apply.yml@refs/heads/main",
-            "Software-Architecture-Group-7-FIAP/k8s-infra/.github/workflows/destroy.yml@refs/heads/main",
-        )
-        for workflow_ref in expected_k8s_workflow_refs:
-            self.assertIn(f'workflow_ref = "{workflow_ref}"', k8s_repository_config)
+        self.assertNotIn("workflow_ref", k8s_repository_config)
         self.assertNotIn("branch-pipeline.yml", k8s_repository_config)
         self.assertNotIn('environment = "production"', k8s_repository_config)
 
@@ -123,13 +99,9 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
                 f'variable = "${{local.oidc_host}}:{unsupported_claim}"', plan_trust
             )
         self.assertIn('default     = "Software-Architecture-Group-7-FIAP"', variables)
-        self.assertIn(
-            'plan    = "${var.github_org}/k8s-infra/.github/workflows/ci.yml@refs/heads/main"',
-            bootstrap,
-        )
-        self.assertIn("local.k8s_workflow_ref.plan", plan_trust)
         self.assertIn('"${local.repo_subject[each.key]}:ref:refs/heads/main"', plan_trust)
-        self.assertIn(":environment:staging:workflow_ref:${local.k8s_workflow_ref.plan}", plan_trust)
+        self.assertIn('"${local.repo_subject[each.key]}:environment:${env}"', plan_trust)
+        self.assertNotIn("workflow_ref", plan_trust)
 
         deploy_trust = bootstrap.split(
             'data "aws_iam_policy_document" "deploy_trust" {', maxsplit=1
@@ -144,8 +116,9 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
             self.assertNotIn(
                 f'variable = "${{local.oidc_host}}:{unsupported_claim}"', deploy_trust
             )
-        self.assertIn("statement.value.workflow_ref == \"\" ? \"\"", deploy_trust)
-        self.assertIn(":environment:${statement.value.environment}:workflow_ref:${statement.value.workflow_ref}", deploy_trust)
+        self.assertIn("each.value.deploy_environments", deploy_trust)
+        self.assertIn('"${local.repo_subject[each.key]}:environment:${statement.value}"', deploy_trust)
+        self.assertNotIn("workflow_ref", deploy_trust)
         self.assertNotIn("StringLike", deploy_trust)
         self.assertNotIn("*", deploy_trust)
 
@@ -159,18 +132,14 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
             self.assertNotIn(
                 f'variable = "${{local.oidc_host}}:{unsupported_claim}"', audit_trust
             )
-        self.assertIn(
-            'audit   = "${var.github_org}/k8s-infra/.github/workflows/orphan-audit.yml@refs/heads/main"',
-            bootstrap,
-        )
-        self.assertIn("local.k8s_workflow_ref.audit", audit_trust)
-        self.assertIn(":environment:staging:workflow_ref:${local.k8s_workflow_ref.audit}", audit_trust)
+        self.assertIn('values   = ["${local.repo_subject["k8s-infra"]}:environment:staging"]', audit_trust)
+        self.assertNotIn("workflow_ref", audit_trust)
 
         hml_trust = bootstrap.split(
             'data "aws_iam_policy_document" "hml_deploy_trust" {', maxsplit=1
         )[1].split('resource "aws_iam_role" "hml_deploy"', maxsplit=1)[0]
-        self.assertIn("local.k8s_workflow_ref.apply", hml_trust)
-        self.assertIn("local.k8s_workflow_ref.destroy", hml_trust)
+        self.assertIn('values   = ["${local.repo_subject["k8s-infra"]}:environment:staging"]', hml_trust)
+        self.assertNotIn("workflow_ref", hml_trust)
         self.assertNotIn("branch-pipeline.yml", hml_trust)
         self.assertNotIn("production", hml_trust)
         self.assertIn('name                 = "gh-deploy-k8s-hml"', bootstrap)
@@ -181,6 +150,34 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
         self.assertIn("manifest-hml.json", hml_policy)
         self.assertNotIn("production/terraform.tfstate", hml_policy)
         self.assertNotIn("PowerUserAccess", hml_policy)
+
+        lambda_hml_trust = bootstrap.split(
+            'data "aws_iam_policy_document" "lambda_auth_hml_trust" {', maxsplit=1
+        )[1].split('resource "aws_iam_role" "lambda_auth_hml_deploy"', maxsplit=1)[0]
+        self.assertIn(
+            'values   = ["${local.repo_subject["lambda-auth"]}:environment:hml"]',
+            lambda_hml_trust,
+        )
+        self.assertNotIn("workflow_ref", lambda_hml_trust)
+        lambda_hml_role = bootstrap.split(
+            'resource "aws_iam_role" "lambda_auth_hml_deploy" {', maxsplit=1
+        )[1].split('data "aws_iam_policy_document" "lambda_auth_hml_state" {', maxsplit=1)[0]
+        lambda_hml_state = bootstrap.split(
+            'data "aws_iam_policy_document" "lambda_auth_hml_state" {', maxsplit=1
+        )[1].split('resource "aws_iam_role_policy" "lambda_auth_hml_state"', maxsplit=1)[0]
+        self.assertIn('name                 = "gh-deploy-lambda-auth-hml"', lambda_hml_role)
+        self.assertIn("lambda-auth/hml/terraform.tfstate", lambda_hml_state)
+        self.assertIn("terraform.tfstate.tflock", lambda_hml_state)
+        self.assertNotIn("PowerUserAccess", lambda_hml_state)
+        deploy_poweruser = bootstrap.split(
+            'resource "aws_iam_role_policy_attachment" "deploy_poweruser" {', maxsplit=1
+        )[1].split("\n}", maxsplit=1)[0]
+        self.assertIn("aws_iam_role.deploy[each.key]", deploy_poweruser)
+        self.assertNotIn("lambda_auth_hml_deploy", deploy_poweruser)
+        outputs = (ROOT / "envs" / "staging" / "bootstrap" / "outputs.tf").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('output "lambda_auth_hml_deploy_role_arn"', outputs)
 
         hml_state_denial = bootstrap.split(
             'sid     = "DenyIsolatedK8sEnvironmentStateAndPlans"', maxsplit=1
