@@ -5,6 +5,39 @@ data "aws_ssm_parameter" "vpc_id" {
 }
 
 locals {
+  app_environments = ["hml", "prd"]
+  eso_environments = {
+    for env in local.app_environments : env => {
+      app_namespace        = "auto-shop-${env}"
+      controller_namespace = "external-secrets-${env}"
+      runtime_secret_name  = "auto-shop/staging/${env}/app-runtime"
+    }
+  }
+  eso_scoped_values = {
+    scopedRBAC                   = true
+    processClusterExternalSecret = false
+    processClusterStore          = false
+    processClusterGenerator      = false
+    processClusterPushSecret     = false
+    processPushSecret            = false
+    processSecretStore           = true
+    crds = {
+      createClusterExternalSecret = false
+      createClusterSecretStore    = false
+      createClusterGenerator      = false
+      createClusterPushSecret     = false
+      createSecretStore           = true
+      createPushSecret            = false
+    }
+    rbac = {
+      serviceAccountTokenCreate = false
+      servicebindings           = { create = false }
+      aggregateToView           = false
+      aggregateToEdit           = false
+      aggregateToAdmin          = false
+    }
+  }
+
   # Recomputed from the bootstrap stack's fixed name/path convention (see foundation/main.tf for the
   # same pattern) rather than read via remote state.
   project_boundary_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/auto-shop/auto-shop-boundary"
@@ -48,6 +81,8 @@ data "aws_iam_policy_document" "lbc_pod_identity_trust" {
 }
 
 data "aws_iam_policy_document" "eso_pod_identity_trust" {
+  for_each = local.eso_environments
+
   statement {
     actions = ["sts:AssumeRole", "sts:TagSession"]
 
@@ -71,7 +106,7 @@ data "aws_iam_policy_document" "eso_pod_identity_trust" {
     condition {
       test     = "StringEquals"
       variable = "aws:RequestTag/kubernetes-namespace"
-      values   = ["external-secrets"]
+      values   = [each.value.controller_namespace]
     }
 
     condition {
@@ -141,53 +176,76 @@ resource "helm_release" "lbc" {
   depends_on = [aws_eks_pod_identity_association.lbc, aws_iam_role_policy_attachment.lbc]
 }
 
-# --- External Secrets Operator: reads only the app-runtime secrets of each environment.
-
-resource "aws_iam_role" "eso" {
-  name                 = "auto-shop-staging-external-secrets"
-  path                 = "/auto-shop/"
-  assume_role_policy   = data.aws_iam_policy_document.eso_pod_identity_trust.json
-  permissions_boundary = local.project_boundary_arn
-}
+# --- External Secrets Operator: one controller and IAM identity per application environment.
 
 data "aws_iam_policy_document" "eso" {
+  for_each = local.eso_environments
+
   statement {
     sid     = "ReadAppRuntimeSecretsOnly"
     actions = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
     # Naming contract with database-infra: auto-shop/staging/<env>/app-runtime (AWS appends a random suffix).
-    resources = [
-      for env in var.environments :
-      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:auto-shop/staging/${env}/app-runtime-*"
-    ]
+    resources = ["arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${each.value.runtime_secret_name}-*"]
   }
 }
 
+resource "kubernetes_namespace_v1" "eso" {
+  for_each = local.eso_environments
+
+  metadata {
+    name = each.value.controller_namespace
+    labels = {
+      "app.kubernetes.io/part-of"                  = "auto-shop-platform"
+      "auto-shop/environment"                      = each.key
+      "pod-security.kubernetes.io/enforce"         = "restricted"
+      "pod-security.kubernetes.io/enforce-version" = "latest"
+      "pod-security.kubernetes.io/warn"            = "restricted"
+      "pod-security.kubernetes.io/audit"           = "restricted"
+    }
+  }
+}
+
+resource "aws_iam_role" "eso" {
+  for_each = local.eso_environments
+
+  name                 = "auto-shop-staging-external-secrets-${each.key}"
+  path                 = "/auto-shop/"
+  assume_role_policy   = data.aws_iam_policy_document.eso_pod_identity_trust[each.key].json
+  permissions_boundary = local.project_boundary_arn
+}
+
 resource "aws_iam_role_policy" "eso" {
-  name   = "read-app-runtime-secrets"
-  role   = aws_iam_role.eso.id
-  policy = data.aws_iam_policy_document.eso.json
+  for_each = local.eso_environments
+
+  name   = "read-${each.key}-app-runtime-secret"
+  role   = aws_iam_role.eso[each.key].id
+  policy = data.aws_iam_policy_document.eso[each.key].json
 }
 
 resource "aws_eks_pod_identity_association" "eso" {
+  for_each = local.eso_environments
+
   cluster_name    = data.aws_eks_cluster.this.name
-  namespace       = "external-secrets"
+  namespace       = each.value.controller_namespace
   service_account = "external-secrets"
-  role_arn        = aws_iam_role.eso.arn
+  role_arn        = aws_iam_role.eso[each.key].arn
+
+  depends_on = [aws_iam_role_policy.eso]
 }
 
-resource "helm_release" "eso" {
-  name             = "external-secrets"
-  repository       = "https://charts.external-secrets.io"
-  chart            = "external-secrets"
-  version          = var.chart_versions.external_secrets
-  namespace        = "external-secrets"
-  create_namespace = true
-  wait             = true
-  timeout          = 600
+resource "helm_release" "eso_hml" {
+  name       = "external-secrets-hml"
+  repository = "https://charts.external-secrets.io"
+  chart      = "external-secrets"
+  version    = var.chart_versions.external_secrets
+  namespace  = local.eso_environments["hml"].controller_namespace
+  wait       = true
+  timeout    = 600
 
-  values = [yamlencode({
-    crds         = { enabled = true } # chart >=0.10 renamed installCRDs to crds.enabled
-    replicaCount = 1
+  values = [yamlencode(merge(local.eso_scoped_values, {
+    installCRDs     = true
+    scopedNamespace = local.eso_environments["hml"].app_namespace
+    replicaCount    = 1
     serviceAccount = {
       create = true
       name   = "external-secrets"
@@ -210,7 +268,56 @@ resource "helm_release" "eso" {
         limits   = { memory = "128Mi" }
       }
     }
-  })]
+  }))]
 
-  depends_on = [aws_eks_pod_identity_association.eso]
+  depends_on = [
+    aws_eks_pod_identity_association.eso["hml"],
+    aws_iam_role_policy.eso["hml"],
+    kubernetes_namespace_v1.eso["hml"],
+  ]
+}
+
+resource "helm_release" "eso_prd" {
+  name       = "external-secrets-prd"
+  repository = "https://charts.external-secrets.io"
+  chart      = "external-secrets"
+  version    = var.chart_versions.external_secrets
+  namespace  = local.eso_environments["prd"].controller_namespace
+  wait       = true
+  timeout    = 600
+
+  values = [yamlencode(merge(local.eso_scoped_values, {
+    installCRDs     = false
+    scopedNamespace = local.eso_environments["prd"].app_namespace
+    replicaCount    = 1
+    serviceAccount = {
+      create = true
+      name   = "external-secrets"
+    }
+    resources = {
+      requests = { cpu = "25m", memory = "64Mi" }
+      limits   = { memory = "192Mi" }
+    }
+    webhook = {
+      replicaCount = 1
+      resources = {
+        requests = { cpu = "10m", memory = "32Mi" }
+        limits   = { memory = "128Mi" }
+      }
+    }
+    certController = {
+      replicaCount = 1
+      resources = {
+        requests = { cpu = "10m", memory = "32Mi" }
+        limits   = { memory = "128Mi" }
+      }
+    }
+  }))]
+
+  depends_on = [
+    helm_release.eso_hml,
+    aws_eks_pod_identity_association.eso["prd"],
+    aws_iam_role_policy.eso["prd"],
+    kubernetes_namespace_v1.eso["prd"],
+  ]
 }

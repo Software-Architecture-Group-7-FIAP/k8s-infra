@@ -17,7 +17,7 @@ from pathlib import Path
 PLAN_ID_PATTERN = re.compile(r"[0-9]+-[0-9]+\Z")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40,64}\Z")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
-ALLOWED_STACKS = {"foundation", "platform"}
+ALLOWED_STACKS = {"foundation", "platform", "hml", "production"}
 ALLOWED_PURPOSES = {"apply", "destroy"}
 ALLOWED_SESSION_MODES = {"hml", "prd-window"}
 STARTED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -100,7 +100,9 @@ def _validate_aws_scope(account_id: str, region: str) -> None:
 def _parse_plan_argument(value: str) -> tuple[str, Path]:
     stack, separator, file_name = value.partition("=")
     if not separator or stack not in ALLOWED_STACKS or not file_name:
-        raise PlanArtifactError("Each plan must be supplied as foundation=FILE or platform=FILE.")
+        raise PlanArtifactError(
+            "Each plan must be supplied as foundation=FILE, platform=FILE, hml=FILE, or production=FILE."
+        )
     path = Path(file_name)
     if not path.is_file():
         raise PlanArtifactError(f"Saved plan for {stack} does not exist.")
@@ -125,6 +127,7 @@ def create_manifest(arguments: argparse.Namespace) -> int:
     plans: dict[str, dict[str, str]] = {}
     for value in arguments.plan:
         stack, path = _parse_plan_argument(value)
+        _validate_stack_session_mode(stack, session_mode)
         if stack in plans:
             raise PlanArtifactError(f"The {stack} plan was supplied more than once.")
         plans[stack] = {"file": f"{stack}.tfplan", "sha256": _sha256(path)}
@@ -168,7 +171,8 @@ def verify_manifest(arguments: argparse.Namespace) -> int:
     scope = getattr(arguments, "scope", default_scope)
     _validate_lifecycle_scope(arguments.purpose, scope, session_mode)
     if arguments.stack not in ALLOWED_STACKS:
-        raise PlanArtifactError("stack must be foundation or platform.")
+        raise PlanArtifactError("stack must be foundation, platform, hml, or production.")
+    _validate_stack_session_mode(arguments.stack, session_mode)
     _validate_scope_stack(arguments.purpose, scope, (arguments.stack,))
     expected_started_at = _parse_utc(arguments.session_started_at, "session_started_at")
 
@@ -232,13 +236,19 @@ def _validate_lifecycle_scope(purpose: str, scope: str, session_mode: str) -> No
         raise PlanArtifactError("A destroy plan scope must be all or compute.")
 
 
+def _validate_stack_session_mode(stack: str, session_mode: str) -> None:
+    expected_mode = {"hml": "hml", "production": "prd-window"}.get(stack)
+    if expected_mode is not None and session_mode != expected_mode:
+        raise PlanArtifactError(f"The {stack} root requires session_mode={expected_mode}.")
+
+
 def _validate_scope_stack(purpose: str, scope: str, stacks: Iterable[str]) -> None:
     stack_set = set(stacks)
     if len(stack_set) != 1:
         raise PlanArtifactError("Each saved-plan artifact must contain exactly one Terraform stack.")
-    if purpose == "destroy" and scope == "all" and stack_set != {"platform"}:
+    if purpose == "destroy" and scope == "all" and stack_set == {"foundation"}:
         raise PlanArtifactError(
-            "The all destroy scope is valid only for platform; foundation must preserve persistent network and SSM resources."
+            "The all destroy scope cannot target foundation; it must preserve persistent network and SSM resources."
         )
     if scope == "compute" and stack_set != {"foundation"}:
         raise PlanArtifactError("The compute destroy scope is valid only for foundation.")

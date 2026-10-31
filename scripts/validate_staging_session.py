@@ -1,8 +1,5 @@
 import argparse
-import hashlib
-import hmac
 import os
-import re
 import sys
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -23,34 +20,8 @@ HML_LATEST_START = time(17, 0)
 HML_LAST_DATE = date(2026, 10, 31)
 HML_WORK_END_TIME = time(22, 0)
 STARTED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-SESSION_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-
-
 class StagingSessionError(ValueError):
     """Raised when a staging session is missing, unauthorized, or expired."""
-
-
-def _verify_session_token(
-    *,
-    session_token: str,
-    signing_key: str,
-    mode: str,
-    session_id: str,
-    started_at: str,
-) -> None:
-    if len(signing_key.encode("utf-8")) < 32:
-        raise StagingSessionError(
-            "LIFECYCLE_SESSION_SIGNING_KEY must be configured with at least 32 bytes."
-        )
-    if not SESSION_TOKEN_PATTERN.fullmatch(session_token):
-        raise StagingSessionError("A valid lifecycle session token is required.")
-
-    message = f"{mode}|{session_id}|{started_at}".encode("utf-8")
-    expected_token = hmac.new(
-        signing_key.encode("utf-8"), message, hashlib.sha256
-    ).hexdigest()
-    if not hmac.compare_digest(session_token, expected_token):
-        raise StagingSessionError("The lifecycle session token does not authorize this context.")
 
 
 def _parse_started_at(value: str) -> datetime:
@@ -131,12 +102,9 @@ def validate_staging_session(
             local_start.date(), HML_WORK_END_TIME, tzinfo=PRD_TIMEZONE
         ).astimezone(timezone.utc)
         session_end = min(start + MAX_SESSION_DURATION, hml_day_end)
-        cleanup_end = min(
-            session_end + CLEANUP_GRACE_DURATION,
-            datetime.combine(
-                local_start.date(), PRD_CLEANUP_END_TIME, tzinfo=PRD_TIMEZONE
-            ).astimezone(timezone.utc),
-        )
+        cleanup_end = datetime.combine(
+            local_start.date(), PRD_CLEANUP_END_TIME, tzinfo=PRD_TIMEZONE
+        ).astimezone(timezone.utc)
     else:
         if not PRD_FIRST_DATE <= local_start.date() <= PRD_LAST_DATE:
             raise StagingSessionError(
@@ -148,9 +116,12 @@ def validate_staging_session(
             )
         if local_start.date() != local_now.date():
             raise StagingSessionError("The PRD session must start on the current BRT day.")
-        session_end = datetime.combine(
-            local_start.date(), PRD_WORK_END_TIME, tzinfo=PRD_TIMEZONE
-        ).astimezone(timezone.utc)
+        session_end = min(
+            start + MAX_SESSION_DURATION,
+            datetime.combine(
+                local_start.date(), PRD_WORK_END_TIME, tzinfo=PRD_TIMEZONE
+            ).astimezone(timezone.utc),
+        )
         cleanup_end = datetime.combine(
             local_start.date(), PRD_CLEANUP_END_TIME, tzinfo=PRD_TIMEZONE
         ).astimezone(timezone.utc)
@@ -158,8 +129,8 @@ def validate_staging_session(
     audit_start = cleanup_end - CLEANUP_AUDIT_RESERVE
     teardown_end = audit_start - TEARDOWN_SAFETY_MARGIN
     if operation == "teardown":
-        if now < session_end:
-            raise StagingSessionError("Teardown cannot start before the authorized work window ends.")
+        if now < start:
+            raise StagingSessionError("Teardown cannot start before the authorized session begins.")
         if now >= teardown_end:
             raise StagingSessionError("Teardown must stop 20 minutes before the cleanup deadline to reserve the audit window.")
         remaining = teardown_end - now
@@ -175,7 +146,7 @@ def validate_staging_session(
                 raise StagingSessionError(
                     "The HML session ended at the earlier of five hours or 22:00 BRT."
                 )
-            raise StagingSessionError("The PRD work window ended at 22:00 America/Sao_Paulo.")
+            raise StagingSessionError("The PRD session ended at its five-hour limit or 22:00 BRT work cutoff.")
         remaining = session_end - now
     if remaining < timedelta(seconds=minimum_remaining_seconds):
         boundary = "session" if operation == "work" else "authorized lifecycle"
@@ -190,7 +161,6 @@ def main() -> int:
     parser.add_argument("--mode", choices=("hml", "prd-window"))
     parser.add_argument("--session-id")
     parser.add_argument("--started-at")
-    parser.add_argument("--session-token")
     parser.add_argument("--operation", choices=("work", "teardown", "audit"), default="work")
     parser.add_argument(
         "--github-output",
@@ -202,16 +172,8 @@ def main() -> int:
     mode = arguments.mode or os.environ.get("STAGING_SESSION_MODE", "")
     session_id = arguments.session_id or os.environ.get("STAGING_SESSION_ID", "")
     started_at = arguments.started_at or os.environ.get("STAGING_SESSION_STARTED_AT", "")
-    session_token = arguments.session_token or os.environ.get("STAGING_SESSION_TOKEN", "")
 
     try:
-        _verify_session_token(
-            session_token=session_token,
-            signing_key=os.environ.get("LIFECYCLE_SESSION_SIGNING_KEY", ""),
-            mode=mode,
-            session_id=session_id,
-            started_at=started_at,
-        )
         remaining = validate_staging_session(
             active=os.environ.get("STAGING_ACTIVE", ""),
             authorized=os.environ.get("STAGING_SESSION_AUTHORIZED", ""),

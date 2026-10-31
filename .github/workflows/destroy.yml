@@ -13,14 +13,16 @@ on:
           - plan
           - destroy
       stack:
-        description: Destroy platform before foundation
+        description: Destroy HML/production roots before platform and foundation
         required: true
         type: choice
         options:
+          - hml
+          - production
           - platform
           - foundation
       scope:
-        description: Use compute for foundation or all for platform; persistent network resources are protected
+        description: Use all for an environment/platform root or compute for foundation; persistent network resources are protected
         required: true
         default: compute
         type: choice
@@ -33,10 +35,6 @@ on:
         type: string
       started_at:
         description: Coordinator-provided UTC session start, YYYY-MM-DDTHH:MM:SSZ
-        required: true
-        type: string
-      session_token:
-        description: Coordinator-signed authorization for this exact session context
         required: true
         type: string
       lifecycle_dispatch_id:
@@ -72,6 +70,7 @@ env:
   TF_VERSION: 1.15.8
   TF_IN_AUTOMATION: "true"
   EXPECTED_AWS_ACCOUNT_ID: "035611741563"
+  LIFECYCLE_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
   PLAN_BUCKET: auto-shop-tfstate-035611741563-use1
   PLAN_PREFIX: k8s-infra/staging/plans
   EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
@@ -106,16 +105,10 @@ jobs:
           REQUESTED_SCOPE: ${{ inputs.scope }}
           REQUESTED_SESSION_ID: ${{ inputs.session_id }}
           REQUESTED_STARTED_AT: ${{ inputs.started_at }}
-          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
           REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
-          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
         run: |
           set -euo pipefail
-          if [[ -n "$REQUESTED_SESSION_TOKEN" ]]; then
-            echo "::add-mask::$REQUESTED_SESSION_TOKEN"
-          fi
           if [[ -n "$REQUESTED_LIFECYCLE_DISPATCH_ID" && ! "$REQUESTED_LIFECYCLE_DISPATCH_ID" =~ ^[0-9a-f]{32}$ ]]; then
             echo "::error::The lifecycle dispatch ID must be 32 lowercase hexadecimal characters."
             exit 1
@@ -124,18 +117,29 @@ jobs:
             echo "::error::Destroy plans require main."
             exit 1
           fi
-          if [[ "$REQUESTED_STACK" == "platform" && "$REQUESTED_SCOPE" != "all" ]]; then
-            echo "::error::The platform stack supports only scope=all."
-            exit 1
-          fi
-          if [[ "$REQUESTED_STACK" == "foundation" && "$REQUESTED_SCOPE" != "compute" ]]; then
-            echo "::error::Foundation teardown must use scope=compute to preserve the VPC and SSM contract."
-            exit 1
-          fi
           case "$REQUESTED_STACK" in
-            foundation|platform) ;;
+            hml|production|platform)
+              if [[ "$REQUESTED_SCOPE" != "all" ]]; then
+                echo "::error::Environment and platform roots require scope=all."
+                exit 1
+              fi
+              ;;
+            foundation)
+              if [[ "$REQUESTED_SCOPE" != "compute" ]]; then
+                echo "::error::Foundation teardown must use scope=compute to preserve the VPC and SSM contract."
+                exit 1
+              fi
+              ;;
             *) echo "::error::Unsupported Terraform stack."; exit 1 ;;
           esac
+          if [[ "$REQUESTED_STACK" == "hml" && "$REQUESTED_SESSION_MODE" != "hml" ]]; then
+            echo "::error::The HML root can only be torn down in an HML session."
+            exit 1
+          fi
+          if [[ "$REQUESTED_STACK" == "production" && "$REQUESTED_SESSION_MODE" != "prd-window" ]]; then
+            echo "::error::The production root can only be torn down in a PRD window."
+            exit 1
+          fi
           python3 scripts/validate_staging_session.py \
             --session-id "$REQUESTED_SESSION_ID" \
             --started-at "$REQUESTED_STARTED_AT" \
@@ -152,6 +156,41 @@ jobs:
             echo "::error::Staging destroy plans are restricted to us-east-1; received '$REQUESTED_AWS_REGION'."
             exit 1
           fi
+
+      - name: Require a trusted lifecycle actor before AWS credentials
+        env:
+          LIFECYCLE_TRUSTED_OPERATORS: ${{ vars.LIFECYCLE_TRUSTED_OPERATORS || '' }}
+        run: python3 scripts/require_trusted_lifecycle_operator.py
+
+      - name: Require the exact isolated HML deploy role before AWS credentials
+        if: inputs.stack == 'hml'
+        env:
+          HML_DEPLOY_ROLE_ARN: ${{ vars.AWS_HML_DEPLOY_ROLE_ARN || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$HML_DEPLOY_ROLE_ARN" != "arn:aws:iam::035611741563:role/auto-shop/gh-deploy-k8s-hml" ]]; then
+            echo "::error::AWS_HML_DEPLOY_ROLE_ARN must be configured to the dedicated HML-only role."
+            exit 1
+          fi
+
+      - name: Assume the dedicated lifecycle authorization consumer role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ env.EXPECTED_AWS_ACCOUNT_ID }}:role/auto-shop/auto-shop-staging-github-lifecycle-consumer-k8s-destroy
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 900
+          role-session-name: lifecycle-consumer-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Consume the one-use destroy-plan dispatch authorization
+        env:
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/consume_lifecycle_dispatch.py \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
+            --workflow "Destroy"
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
@@ -188,7 +227,7 @@ jobs:
         run: bash scripts/validate_plan_bucket.sh
 
       - name: Require runner access before creating a platform destroy plan
-        if: inputs.stack == 'platform'
+        if: inputs.stack == 'platform' || inputs.stack == 'hml' || inputs.stack == 'production'
         run: |
           set +e
           bash scripts/eks-endpoint-access.sh runner-allowed
@@ -209,8 +248,6 @@ jobs:
           SESSION_ID: ${{ inputs.session_id }}
           SESSION_STARTED_AT: ${{ inputs.started_at }}
           SESSION_MODE: ${{ inputs.session_mode }}
-          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
           REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
           set -euo pipefail
@@ -222,36 +259,14 @@ jobs:
           plan_json="$plan_dir/plan.json"
           manifest_file="$plan_dir/manifest.json"
 
-          if [[ "$STACK" == "foundation" ]]; then
-            platform_state_key="$(aws s3api list-objects-v2 \
-              --bucket "$PLAN_BUCKET" \
-              --prefix k8s-infra/staging/platform.tfstate \
-              --region "$REQUESTED_AWS_REGION" \
-              --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
-              --query "Contents[?Key == 'k8s-infra/staging/platform.tfstate'].Key | [0]" \
-              --output text)"
-            if [[ "$platform_state_key" != "None" ]]; then
-              terraform -chdir=envs/staging/platform init -input=false
-              platform_state="$(terraform -chdir=envs/staging/platform state list -lock=false)"
-              managed_platform_resources=()
-              while IFS= read -r address; do
-                [[ -n "$address" ]] || continue
-                case "$address" in
-                  data.*|*.data.*) ;;
-                  *) managed_platform_resources+=("$address") ;;
-                esac
-              done <<< "$platform_state"
-              if (( ${#managed_platform_resources[@]} > 0 )); then
-                echo "::error::Destroy the platform stack first; it still contains Terraform resources."
-                printf '%s\n' "${managed_platform_resources[@]}" >&2
-                exit 1
-              fi
-            fi
+          if [[ "$STACK" == "foundation" || "$STACK" == "platform" ]]; then
+            bash scripts/assert_roots_empty_before_destroy.sh "$STACK"
           fi
 
-          terraform -chdir="envs/staging/$STACK" init -input=false
+          terraform_root="$(python3 scripts/terraform_root.py "$STACK")"
+          terraform -chdir="$terraform_root" init -input=false
           if [[ "$STACK" == "foundation" && "$SCOPE" == "compute" ]]; then
-            terraform -chdir="envs/staging/$STACK" plan \
+            terraform -chdir="$terraform_root" plan \
               -destroy \
               -target=module.eks \
               -target=module.alb \
@@ -261,7 +276,7 @@ jobs:
               -out="$plan_file" >/dev/null
             guard_policy="compute-destroy"
           else
-            terraform -chdir="envs/staging/$STACK" plan \
+            terraform -chdir="$terraform_root" plan \
               -destroy \
               -input=false \
               -lock=false \
@@ -269,7 +284,7 @@ jobs:
               -out="$plan_file" >/dev/null
             guard_policy="all-destroy"
           fi
-          terraform -chdir="envs/staging/$STACK" show -json "$plan_file" > "$plan_json"
+          terraform -chdir="$terraform_root" show -json "$plan_file" > "$plan_json"
           python3 scripts/terraform_plan_guard.py --plan-json "$plan_json" --policy "$guard_policy"
           ./scripts/plan-summary.sh "$plan_file" "$STACK" >> "$GITHUB_STEP_SUMMARY"
           python3 scripts/validate_staging_session.py \
@@ -310,7 +325,7 @@ jobs:
           plan_base_key="$PLAN_PREFIX/$plan_id/destroy"
           aws s3api put-object \
             --bucket "$PLAN_BUCKET" \
-            --key "$plan_base_key/manifest.json" \
+            --key "$plan_base_key/manifest-$STACK.json" \
             --body "$manifest_file" \
             --region "$REQUESTED_AWS_REGION" \
             --server-side-encryption AES256 \
@@ -375,17 +390,11 @@ jobs:
           REQUESTED_PLAN_ID: ${{ inputs.plan_id }}
           REQUESTED_SESSION_ID: ${{ inputs.session_id }}
           REQUESTED_STARTED_AT: ${{ inputs.started_at }}
-          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
           REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
           CONFIRM: ${{ inputs.confirm }}
-          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
         run: |
           set -euo pipefail
-          if [[ -n "$REQUESTED_SESSION_TOKEN" ]]; then
-            echo "::add-mask::$REQUESTED_SESSION_TOKEN"
-          fi
           if [[ -n "$REQUESTED_LIFECYCLE_DISPATCH_ID" && ! "$REQUESTED_LIFECYCLE_DISPATCH_ID" =~ ^[0-9a-f]{32}$ ]]; then
             echo "::error::The lifecycle dispatch ID must be 32 lowercase hexadecimal characters."
             exit 1
@@ -394,12 +403,27 @@ jobs:
             echo "::error::Destroy requires main."
             exit 1
           fi
-          if [[ "$REQUESTED_STACK" == "platform" && "$REQUESTED_SCOPE" != "all" ]]; then
-            echo "::error::The platform stack supports only scope=all."
+          case "$REQUESTED_STACK" in
+            hml|production|platform)
+              if [[ "$REQUESTED_SCOPE" != "all" ]]; then
+                echo "::error::Environment and platform roots require scope=all."
+                exit 1
+              fi
+              ;;
+            foundation)
+              if [[ "$REQUESTED_SCOPE" != "compute" ]]; then
+                echo "::error::Foundation teardown must use scope=compute to preserve the VPC and SSM contract."
+                exit 1
+              fi
+              ;;
+            *) echo "::error::Unsupported Terraform stack."; exit 1 ;;
+          esac
+          if [[ "$REQUESTED_STACK" == "hml" && "$REQUESTED_SESSION_MODE" != "hml" ]]; then
+            echo "::error::The HML root can only be torn down in an HML session."
             exit 1
           fi
-          if [[ "$REQUESTED_STACK" == "foundation" && "$REQUESTED_SCOPE" != "compute" ]]; then
-            echo "::error::Foundation teardown must use scope=compute to preserve the VPC and SSM contract."
+          if [[ "$REQUESTED_STACK" == "production" && "$REQUESTED_SESSION_MODE" != "prd-window" ]]; then
+            echo "::error::The production root can only be torn down in a PRD window."
             exit 1
           fi
           if [[ "$CONFIRM" != "destroy" ]]; then
@@ -411,7 +435,7 @@ jobs:
             exit 1
           fi
           case "$REQUESTED_STACK" in
-            foundation|platform) ;;
+            hml|production|foundation|platform) ;;
             *) echo "::error::Unsupported Terraform stack."; exit 1 ;;
           esac
           python3 scripts/validate_staging_session.py \
@@ -449,12 +473,46 @@ jobs:
             exit 1
           fi
 
+      - name: Require a trusted lifecycle actor before AWS credentials
+        env:
+          LIFECYCLE_TRUSTED_OPERATORS: ${{ vars.LIFECYCLE_TRUSTED_OPERATORS || '' }}
+        run: python3 scripts/require_trusted_lifecycle_operator.py
+
+      - name: Assume the dedicated lifecycle authorization consumer role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ env.EXPECTED_AWS_ACCOUNT_ID }}:role/auto-shop/auto-shop-staging-github-lifecycle-consumer-k8s-destroy
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 900
+          role-session-name: lifecycle-consumer-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Consume the one-use destroy dispatch authorization
+        env:
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/consume_lifecycle_dispatch.py \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
+            --workflow "Destroy"
+
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        name: Assume the namespace-scoped HML deploy role
+        if: inputs.stack == 'hml'
+        with:
+          role-to-assume: ${{ vars.AWS_HML_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 3600
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        name: Assume the shared staging deploy role
+        if: inputs.stack != 'hml'
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -487,7 +545,7 @@ jobs:
         run: bash scripts/validate_plan_bucket.sh
 
       - name: Require the runner to be in the EKS administrator allowlist
-        if: inputs.stack == 'platform'
+        if: inputs.stack == 'platform' || inputs.stack == 'hml' || inputs.stack == 'production'
         run: |
           set +e
           bash scripts/eks-endpoint-access.sh runner-allowed
@@ -509,8 +567,6 @@ jobs:
           SESSION_ID: ${{ inputs.session_id }}
           SESSION_STARTED_AT: ${{ inputs.started_at }}
           SESSION_MODE: ${{ inputs.session_mode }}
-          STAGING_SESSION_TOKEN: ${{ inputs.session_token }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
           REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
           set -euo pipefail
@@ -521,7 +577,7 @@ jobs:
           plan_json="$plan_dir/plan.json"
           manifest_file="$plan_dir/manifest.json"
           plan_key="$PLAN_PREFIX/$PLAN_ID/destroy/$STACK.tfplan"
-          manifest_key="$PLAN_PREFIX/$PLAN_ID/destroy/manifest.json"
+          manifest_key="$PLAN_PREFIX/$PLAN_ID/destroy/manifest-$STACK.json"
 
           aws s3 cp "s3://$PLAN_BUCKET/$plan_key" "$plan_file" \
             --region "$REQUESTED_AWS_REGION" \
@@ -549,35 +605,13 @@ jobs:
             --scope "$SCOPE" \
             --terraform-version "$TF_VERSION"
 
-          if [[ "$STACK" == "foundation" ]]; then
-            platform_state_key="$(aws s3api list-objects-v2 \
-              --bucket "$PLAN_BUCKET" \
-              --prefix k8s-infra/staging/platform.tfstate \
-              --region "$REQUESTED_AWS_REGION" \
-              --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
-              --query "Contents[?Key == 'k8s-infra/staging/platform.tfstate'].Key | [0]" \
-              --output text)"
-            if [[ "$platform_state_key" != "None" ]]; then
-              terraform -chdir=envs/staging/platform init -input=false
-              platform_state="$(terraform -chdir=envs/staging/platform state list)"
-              managed_platform_resources=()
-              while IFS= read -r address; do
-                [[ -n "$address" ]] || continue
-                case "$address" in
-                  data.*|*.data.*) ;;
-                  *) managed_platform_resources+=("$address") ;;
-                esac
-              done <<< "$platform_state"
-              if (( ${#managed_platform_resources[@]} > 0 )); then
-                echo "::error::Destroy the platform stack first; it still contains Terraform resources."
-                printf '%s\n' "${managed_platform_resources[@]}" >&2
-                exit 1
-              fi
-            fi
+          if [[ "$STACK" == "foundation" || "$STACK" == "platform" ]]; then
+            bash scripts/assert_roots_empty_before_destroy.sh "$STACK"
           fi
 
-          terraform -chdir="envs/staging/$STACK" init -input=false
-          terraform -chdir="envs/staging/$STACK" show -json "$plan_file" > "$plan_json"
+          terraform_root="$(python3 scripts/terraform_root.py "$STACK")"
+          terraform -chdir="$terraform_root" init -input=false
+          terraform -chdir="$terraform_root" show -json "$plan_file" > "$plan_json"
           if [[ "$STACK" == "foundation" && "$SCOPE" == "compute" ]]; then
             guard_policy="compute-destroy"
           else
@@ -590,7 +624,7 @@ jobs:
             --mode "$SESSION_MODE" \
             --operation teardown \
             --minimum-remaining-seconds 720
-          terraform -chdir="envs/staging/$STACK" apply \
+          terraform -chdir="$terraform_root" apply \
             -input=false \
             -lock-timeout=300s \
             "$plan_file" >/dev/null

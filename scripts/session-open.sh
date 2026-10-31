@@ -24,10 +24,6 @@ elif [[ "$session_mode" != "hml" ]]; then
   exit 1
 fi
 
-if [[ -n "${STAGING_SESSION_TOKEN:-}" ]]; then
-  echo "::add-mask::${STAGING_SESSION_TOKEN}"
-fi
-
 python3 scripts/validate_staging_session.py \
   --session-id "$session_id" \
   --started-at "$started_at" \

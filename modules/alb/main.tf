@@ -3,18 +3,9 @@ resource "aws_security_group" "alb" {
   description = "Internal ALB reached by API Gateway VPC Link V2"
   vpc_id      = var.vpc_id
 
+  # The application stack owns listener ingress so it can reference the dedicated VPC Link SG.
+  # Leaving ingress empty here prevents lateral access from other workloads in the VPC.
   tags = merge(var.tags, { Name = "${var.name}-internal-alb" })
-}
-
-resource "aws_vpc_security_group_ingress_rule" "alb_listener" {
-  for_each = var.environments
-
-  security_group_id = aws_security_group.alb.id
-  description       = "${each.key} listener from inside the VPC"
-  ip_protocol       = "tcp"
-  from_port         = each.value
-  to_port           = each.value
-  cidr_ipv4         = var.vpc_cidr
 }
 
 resource "aws_vpc_security_group_egress_rule" "alb_to_pods" {

@@ -19,7 +19,7 @@ case "$PURPOSE" in
   *) echo "Invalid plan purpose." >&2; exit 2 ;;
 esac
 case "$STACK" in
-  foundation|platform) ;;
+  foundation|platform|hml|production) ;;
   *) echo "Invalid stack." >&2; exit 2 ;;
 esac
 if [[ "$AWS_REGION" != "us-east-1" ]]; then
@@ -64,5 +64,5 @@ delete_exact_object_version() {
 }
 
 delete_exact_object_version "$PLAN_BASE_KEY/$STACK.tfplan"
-delete_exact_object_version "$PLAN_BASE_KEY/manifest.json"
+delete_exact_object_version "$PLAN_BASE_KEY/manifest-$STACK.json"
 echo "Removed the consumed saved-plan objects from the private S3 prefix."
