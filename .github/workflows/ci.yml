@@ -353,6 +353,7 @@ jobs:
           ENABLE_NAT_GATEWAY: ${{ inputs.enable_nat_gateway }}
           REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
           TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/.terraform.d/plugin-cache
+          TF_LOG: DEBUG
         run: |
           set -euo pipefail
           terraform_root="$(python3 scripts/terraform_root.py "$STACK")"
@@ -365,7 +366,15 @@ jobs:
           manifest_file="$plan_dir/manifest.json"
 
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
-          terraform -chdir="$terraform_root" init -input=false
+
+          # Diagnostic: test network connectivity to registry
+          echo "Testing network connectivity to Terraform registry..."
+          if ! curl -s -I https://registry.terraform.io/ > /dev/null 2>&1; then
+            echo "Warning: Cannot reach registry.terraform.io - attempting with retry"
+            sleep 5
+          fi
+
+          terraform -chdir="$terraform_root" init -input=false 2>&1 | head -100
           if [[ "$STACK" == "foundation" ]]; then
             terraform -chdir="$terraform_root" plan \
               -var="enable_nat_gateway=$ENABLE_NAT_GATEWAY" \
