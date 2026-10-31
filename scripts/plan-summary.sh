@@ -15,8 +15,16 @@ if [ ! -f "$PLAN_FILE" ]; then
   exit 2
 fi
 
+if [[ "$PLAN_FILE" != /* ]]; then
+  PLAN_FILE="$PWD/$PLAN_FILE"
+fi
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd -- "$repo_root"
+terraform_root="$(python3 scripts/terraform_root.py "$STACK_NAME")"
+
 echo "### $STACK_NAME"
-terraform show -json "$PLAN_FILE" | jq -r '
+terraform -chdir="$terraform_root" show -json "$PLAN_FILE" | jq -r '
   [.resource_changes[]? | select(.change.actions != ["no-op"])] as $changes
   | "Changes: \($changes | length)",
     "",

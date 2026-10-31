@@ -7,6 +7,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class LifecycleWorkflowContractTests(unittest.TestCase):
+    def test_plan_summary_loads_provider_schemas_from_the_selected_terraform_root(self) -> None:
+        plan_summary = (ROOT / "scripts" / "plan-summary.sh").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"',
+            plan_summary,
+        )
+        self.assertIn('cd -- "$repo_root"', plan_summary)
+        self.assertIn(
+            'terraform_root="$(python3 scripts/terraform_root.py "$STACK_NAME")"',
+            plan_summary,
+        )
+        self.assertIn('terraform -chdir="$terraform_root" show -json "$PLAN_FILE"', plan_summary)
+
     def test_lifecycle_consumers_bind_current_actor_before_aws_credentials(self) -> None:
         for workflow_name in (
             "ci.yml",
