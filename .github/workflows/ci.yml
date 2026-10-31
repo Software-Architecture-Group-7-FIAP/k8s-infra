@@ -352,7 +352,6 @@ jobs:
           PLAN_SCOPE: ${{ inputs.operation }}
           ENABLE_NAT_GATEWAY: ${{ inputs.enable_nat_gateway }}
           REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
-          TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/.terraform.d/plugin-cache
         run: |
           set -euo pipefail
           terraform_root="$(python3 scripts/terraform_root.py "$STACK")"
@@ -364,7 +363,6 @@ jobs:
           plan_json="$plan_dir/plan.json"
           manifest_file="$plan_dir/manifest.json"
 
-          mkdir -p "$TF_PLUGIN_CACHE_DIR"
           terraform -chdir="$terraform_root" init -input=false
           if [[ "$STACK" == "foundation" ]]; then
             terraform -chdir="$terraform_root" plan \
@@ -389,7 +387,14 @@ jobs:
             fi
           fi
           python3 scripts/terraform_plan_guard.py --plan-json "$plan_json" --policy "$PLAN_SCOPE"
-          ./scripts/plan-summary.sh "$plan_file" "$STACK" >> "$GITHUB_STEP_SUMMARY"
+          jq -r --arg stack "$STACK" '
+            [.resource_changes[]? | select(.change.actions != ["no-op"])] as $changes
+            | "### \($stack)",
+              "",
+              "Changes: \($changes | length)",
+              "",
+              ($changes[] | "- `\(.change.actions | join("/"))` \(.address)")
+          ' "$plan_json" >> "$GITHUB_STEP_SUMMARY"
 
           session_operation="work"
           minimum_remaining_seconds=3600
