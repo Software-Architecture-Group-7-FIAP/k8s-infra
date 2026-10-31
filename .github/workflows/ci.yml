@@ -57,8 +57,8 @@ env:
   LIFECYCLE_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
   TF_VAR_cluster_endpoint_public_access_cidrs: ${{ vars.EKS_CLUSTER_ENDPOINT_ADMIN_CIDRS }}
   TF_VAR_enable_private_eks_runner: ${{ vars.ENABLE_PRIVATE_EKS_RUNNER || 'false' }}
-  TF_VAR_github_runner_group_id: ${{ vars.GITHUB_RUNNER_GROUP_ID || '0' }}
-  TF_VAR_github_codeconnection_arn: ${{ vars.GITHUB_CODECONNECTION_ARN || '' }}
+  TF_VAR_github_runner_group_id: ${{ vars.PRIVATE_EKS_RUNNER_GROUP_ID || '0' }}
+  TF_VAR_github_codeconnection_arn: ${{ vars.AWS_CODECONNECTION_ARN || '' }}
 
 jobs:
   environment-policy:

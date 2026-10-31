@@ -93,6 +93,10 @@ class PrivateEksRunnerContractTests(unittest.TestCase):
                 self.assertIn("TF_VAR_enable_private_eks_runner", workflow)
                 self.assertIn("TF_VAR_github_runner_group_id", workflow)
                 self.assertIn("TF_VAR_github_codeconnection_arn", workflow)
+                self.assertIn("vars.PRIVATE_EKS_RUNNER_GROUP_ID", workflow)
+                self.assertIn("vars.AWS_CODECONNECTION_ARN", workflow)
+                self.assertNotIn("vars.GITHUB_RUNNER_GROUP_ID", workflow)
+                self.assertNotIn("vars.GITHUB_CODECONNECTION_ARN", workflow)
 
     def test_codebuild_role_is_scoped_and_cannot_consume_lifecycle_or_manage_eks(self) -> None:
         foundation = (ROOT / "envs" / "staging" / "foundation" / "main.tf").read_text(encoding="utf-8")
