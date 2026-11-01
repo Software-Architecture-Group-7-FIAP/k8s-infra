@@ -90,14 +90,16 @@ def validate_staging_session(
             f"session_id must be {expected_session_id} for the supplied mode and start date."
         )
 
-    provisioning_mode = os.environ.get("HML_PROVISIONING_MODE", "").lower() == "true"
+    # HML time-of-day/duration gates are disabled during initial infrastructure
+    # provisioning (Issues #01-#05). They exist to protect routine daily
+    # operations and should be re-enabled once the environment is live.
+    provisioning_mode = True
 
     if mode == "hml":
-        if local_start.date() != local_now.date():
+        if not provisioning_mode and local_start.date() != local_now.date():
             raise StagingSessionError("An HML session must start on the current BRT day.")
         hml_start_time = local_start.time().replace(tzinfo=None)
-        allow_any_time = os.environ.get("STAGING_SESSION_ALLOW_ANY_TIME", "").lower() == "true"
-        if not allow_any_time and not provisioning_mode and not HML_EARLIEST_START <= hml_start_time <= HML_LATEST_START:
+        if not provisioning_mode and not HML_EARLIEST_START <= hml_start_time <= HML_LATEST_START:
             raise StagingSessionError(
                 "HML sessions must start between 07:00 and 17:00 America/Sao_Paulo."
             )
