@@ -22,6 +22,10 @@ on:
         options:
           - hml
           - prd-window
+      session_token:
+        description: Signed coordinator session capability; validation fails if missing.
+        required: false
+        type: string
       lifecycle_dispatch_id:
         description: Coordinator correlation ID for this workflow dispatch
         required: true
