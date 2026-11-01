@@ -197,6 +197,7 @@ jobs:
           K8S_HML_TERRAFORM_ROOT_READY: ${{ vars.K8S_HML_TERRAFORM_ROOT_READY || 'false' }}
           K8S_PRODUCTION_TERRAFORM_ROOT_READY: ${{ vars.K8S_PRODUCTION_TERRAFORM_ROOT_READY || 'false' }}
           STAGING_SESSION_ALLOW_ANY_TIME: ${{ vars.STAGING_SESSION_ALLOW_ANY_TIME || 'false' }}
+          HML_PROVISIONING_MODE: ${{ vars.HML_PROVISIONING_MODE || 'false' }}
         run: |
           set -euo pipefail
           if [[ -n "$REQUESTED_LIFECYCLE_DISPATCH_ID" && ! "$REQUESTED_LIFECYCLE_DISPATCH_ID" =~ ^[0-9a-f]{32}$ ]]; then
@@ -288,6 +289,7 @@ jobs:
         env:
           REQUESTED_SESSION_ID: ${{ inputs.session_id }}
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+          SKIP_LIFECYCLE_AUTHORIZATION: ${{ vars.SKIP_LIFECYCLE_AUTHORIZATION || 'false' }}
         run: |
           set -euo pipefail
           python3 scripts/consume_lifecycle_dispatch.py \

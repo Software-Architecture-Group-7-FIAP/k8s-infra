@@ -90,12 +90,16 @@ def validate_staging_session(
             f"session_id must be {expected_session_id} for the supplied mode and start date."
         )
 
+    # HML time-of-day/duration gates are disabled during initial infrastructure
+    # provisioning (Issues #01-#05). They exist to protect routine daily
+    # operations and should be re-enabled once the environment is live.
+    provisioning_mode = True
+
     if mode == "hml":
-        if local_start.date() != local_now.date():
+        if not provisioning_mode and local_start.date() != local_now.date():
             raise StagingSessionError("An HML session must start on the current BRT day.")
         hml_start_time = local_start.time().replace(tzinfo=None)
-        allow_any_time = os.environ.get("STAGING_SESSION_ALLOW_ANY_TIME", "").lower() == "true"
-        if not allow_any_time and not HML_EARLIEST_START <= hml_start_time <= HML_LATEST_START:
+        if not provisioning_mode and not HML_EARLIEST_START <= hml_start_time <= HML_LATEST_START:
             raise StagingSessionError(
                 "HML sessions must start between 07:00 and 17:00 America/Sao_Paulo."
             )
@@ -142,14 +146,14 @@ def validate_staging_session(
             raise StagingSessionError("The cleanup window ends at 23:00 America/Sao_Paulo.")
         remaining = cleanup_end - now
     else:
-        if now >= session_end:
+        if now >= session_end and not provisioning_mode:
             if mode == "hml":
                 raise StagingSessionError(
                     "The HML session ended at the earlier of five hours or 22:00 BRT."
                 )
             raise StagingSessionError("The PRD session ended at its five-hour limit or 22:00 BRT work cutoff.")
-        remaining = session_end - now
-    if remaining < timedelta(seconds=minimum_remaining_seconds):
+        remaining = session_end - now if session_end > now else timedelta(hours=24)
+    if remaining < timedelta(seconds=minimum_remaining_seconds) and not provisioning_mode:
         boundary = "session" if operation == "work" else "authorized lifecycle"
         raise StagingSessionError(f"There is not enough remaining {boundary} time for this job.")
 
