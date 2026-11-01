@@ -173,6 +173,27 @@ class BootstrapOidcTrustTests(unittest.TestCase):
         self.assertIn('variable = "aws:PrincipalArn"', manage_roles)
         self.assertIn("role${var.iam_path}gh-deploy-k8s-infra", manage_roles)
 
+        pass_runner_role = boundary.split(
+            'sid       = "AllowK8sInfraPassPrivateRunnerRole"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn('actions   = ["iam:PassRole"]', pass_runner_role)
+        self.assertIn("role${var.iam_path}k8s-infra-codebuild-private-runner", pass_runner_role)
+        self.assertIn("role${var.iam_path}gh-deploy-k8s-infra", pass_runner_role)
+        self.assertIn('variable = "iam:PassedToService"', pass_runner_role)
+        self.assertIn('values   = ["codebuild.amazonaws.com"]', pass_runner_role)
+
+        pass_observability_role = boundary.split(
+            'sid       = "AllowK8sInfraPassObservabilityRole"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn('actions   = ["iam:PassRole"]', pass_observability_role)
+        self.assertIn(
+            "role${var.iam_path}auto-shop-staging-cloudwatch-observability",
+            pass_observability_role,
+        )
+        self.assertIn("role${var.iam_path}gh-deploy-k8s-infra", pass_observability_role)
+        self.assertIn('variable = "iam:PassedToService"', pass_observability_role)
+        self.assertIn('values   = ["eks.amazonaws.com"]', pass_observability_role)
+
 
 if __name__ == "__main__":
     unittest.main()
