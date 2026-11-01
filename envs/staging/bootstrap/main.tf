@@ -1057,6 +1057,51 @@ data "aws_iam_policy_document" "project_boundary" {
   }
 
   statement {
+    sid     = "AllowK8sInfraCreateFoundationRoles"
+    actions = ["iam:CreateRole"]
+    resources = [
+      "arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}k8s-infra-codebuild-private-runner",
+      "arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}auto-shop-staging-cloudwatch-observability",
+    ]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}gh-deploy-k8s-infra"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PermissionsBoundary"
+      values   = ["arn:${local.partition}:iam::${local.account_id}:policy${var.iam_path}auto-shop-boundary"]
+    }
+  }
+
+  statement {
+    sid = "AllowK8sInfraManageFoundationRoles"
+    actions = [
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListRolePolicies",
+      "iam:ListRoleTags",
+      "iam:PutRolePolicy",
+      "iam:TagRole",
+      "iam:UntagRole",
+    ]
+    resources = [
+      "arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}k8s-infra-codebuild-private-runner",
+      "arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}auto-shop-staging-cloudwatch-observability",
+    ]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}gh-deploy-k8s-infra"]
+    }
+  }
+
+  statement {
     sid       = "AllowHmlLambdaPassExecutionRole"
     actions   = ["iam:PassRole"]
     resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}lambda-auth-hml-execution"]
