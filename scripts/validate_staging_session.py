@@ -90,10 +90,11 @@ def validate_staging_session(
             f"session_id must be {expected_session_id} for the supplied mode and start date."
         )
 
-    # HML time-of-day/duration gates are disabled during initial infrastructure
-    # provisioning (Issues #01-#05). They exist to protect routine daily
-    # operations and should be re-enabled once the environment is live.
-    provisioning_mode = True
+    # HML time-of-day/duration gates can be disabled during initial infrastructure
+    # provisioning (Issues #01-#05) via HML_PROVISIONING_MODE=true. They exist to
+    # protect routine daily operations; unset (default false) once the
+    # environment is live so the existing test suite's guardrail assertions apply.
+    provisioning_mode = os.environ.get("HML_PROVISIONING_MODE", "").lower() == "true"
 
     if mode == "hml":
         if not provisioning_mode and local_start.date() != local_now.date():
