@@ -360,14 +360,18 @@ jobs:
           plan_key="$PLAN_PREFIX/$PLAN_ID/apply/$STACK.tfplan"
           manifest_key="$PLAN_PREFIX/$PLAN_ID/apply/manifest-$STACK.json"
 
-          aws s3 cp "s3://$PLAN_BUCKET/$plan_key" "$plan_file" \
+          aws s3api get-object \
+            --bucket "$PLAN_BUCKET" \
+            --key "$plan_key" \
             --region "$REQUESTED_AWS_REGION" \
             --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
-            --only-show-errors
-          aws s3 cp "s3://$PLAN_BUCKET/$manifest_key" "$manifest_file" \
+            "$plan_file" >/dev/null
+          aws s3api get-object \
+            --bucket "$PLAN_BUCKET" \
+            --key "$manifest_key" \
             --region "$REQUESTED_AWS_REGION" \
             --expected-bucket-owner "$EXPECTED_AWS_ACCOUNT_ID" \
-            --only-show-errors
+            "$manifest_file" >/dev/null
 
           python3 scripts/terraform_plan_artifact.py verify-attestation \
             --manifest "$manifest_file" \
