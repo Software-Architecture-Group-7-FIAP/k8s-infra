@@ -1130,11 +1130,6 @@ data "aws_iam_policy_document" "project_boundary" {
       values   = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}gh-deploy-k8s-infra"]
     }
 
-    condition {
-      test     = "StringEquals"
-      variable = "iam:PassedToService"
-      values   = ["eks.amazonaws.com"]
-    }
   }
 
   statement {
