@@ -306,7 +306,16 @@ jobs:
         if: inputs.stack != 'hml'
         run: |
           set -euo pipefail
-          if ! aws iam get-policy --policy-arn "arn:aws:iam::${EXPECTED_AWS_ACCOUNT_ID}:policy/auto-shop/auto-shop-boundary" >/dev/null 2>&1; then
+          # The deploy role's own permissions boundary denies iam:GetPolicy on
+          # arbitrary policies (including itself), so this cannot call
+          # `iam:GetPolicy` on the boundary directly. Instead, confirm the
+          # currently assumed role already has the expected boundary attached
+          # via iam:GetRole, which the boundary explicitly allows for self-reads.
+          assumed_role_arn="$(aws sts get-caller-identity --query Arn --output text)"
+          role_name="$(echo "$assumed_role_arn" | sed -E 's#^arn:aws:sts::[0-9]+:assumed-role/([^/]+)/.*#\1#')"
+          expected_boundary_arn="arn:aws:iam::${EXPECTED_AWS_ACCOUNT_ID}:policy/auto-shop/auto-shop-boundary"
+          actual_boundary_arn="$(aws iam get-role --role-name "$role_name" --query 'Role.PermissionsBoundary.PermissionsBoundaryArn' --output text 2>/dev/null || true)"
+          if [[ "$actual_boundary_arn" != "$expected_boundary_arn" ]]; then
             echo "::error::The bootstrap permission boundary is not present in the expected account."
             exit 1
           fi
