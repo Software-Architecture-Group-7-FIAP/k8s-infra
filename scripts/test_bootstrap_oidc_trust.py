@@ -142,6 +142,37 @@ class BootstrapOidcTrustTests(unittest.TestCase):
         self.assertIn('variable = "iam:PassedToService"', pass_migration_role)
         self.assertIn('values   = ["pods.eks.amazonaws.com"]', pass_migration_role)
 
+    def test_k8s_deploy_boundary_grants_are_limited_to_foundation_roles(self):
+        boundary = MAIN_TF.split(
+            'data "aws_iam_policy_document" "project_boundary"', maxsplit=1
+        )[1].split('resource "aws_iam_policy" "project_boundary"', maxsplit=1)[0]
+
+        create_roles = boundary.split(
+            'sid     = "AllowK8sInfraCreateFoundationRoles"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn('actions = ["iam:CreateRole"]', create_roles)
+        self.assertIn("role${var.iam_path}k8s-infra-codebuild-private-runner", create_roles)
+        self.assertIn(
+            "role${var.iam_path}auto-shop-staging-cloudwatch-observability",
+            create_roles,
+        )
+        self.assertIn('variable = "aws:PrincipalArn"', create_roles)
+        self.assertIn("role${var.iam_path}gh-deploy-k8s-infra", create_roles)
+        self.assertIn('variable = "iam:PermissionsBoundary"', create_roles)
+        self.assertIn("policy${var.iam_path}auto-shop-boundary", create_roles)
+
+        manage_roles = boundary.split(
+            'sid = "AllowK8sInfraManageFoundationRoles"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn('"iam:PutRolePolicy"', manage_roles)
+        self.assertIn("role${var.iam_path}k8s-infra-codebuild-private-runner", manage_roles)
+        self.assertIn(
+            "role${var.iam_path}auto-shop-staging-cloudwatch-observability",
+            manage_roles,
+        )
+        self.assertIn('variable = "aws:PrincipalArn"', manage_roles)
+        self.assertIn("role${var.iam_path}gh-deploy-k8s-infra", manage_roles)
+
 
 if __name__ == "__main__":
     unittest.main()
