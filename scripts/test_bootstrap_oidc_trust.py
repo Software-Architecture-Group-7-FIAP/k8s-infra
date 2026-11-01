@@ -191,8 +191,7 @@ class BootstrapOidcTrustTests(unittest.TestCase):
             pass_observability_role,
         )
         self.assertIn("role${var.iam_path}gh-deploy-k8s-infra", pass_observability_role)
-        self.assertIn('variable = "iam:PassedToService"', pass_observability_role)
-        self.assertIn('values   = ["eks.amazonaws.com"]', pass_observability_role)
+        self.assertNotIn('variable = "iam:PassedToService"', pass_observability_role)
 
 
 if __name__ == "__main__":
