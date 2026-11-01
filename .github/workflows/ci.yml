@@ -356,6 +356,8 @@ jobs:
           ENABLE_NAT_GATEWAY: ${{ inputs.enable_nat_gateway }}
           REQUESTED_AWS_REGION: ${{ vars.AWS_REGION }}
           HML_PROVISIONING_MODE: ${{ vars.HML_PROVISIONING_MODE || 'false' }}
+          STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
+          STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
         run: |
           set -euo pipefail
           terraform_root="$(python3 scripts/terraform_root.py "$STACK")"
