@@ -157,6 +157,8 @@ Para abrir a sessão pelos workflows do GitHub Actions, confira conta, região, 
 
 ## CI/CD
 
+Atende o **cenário 3** da issue [auto-shop-system#89](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/issues/89): pipeline **independente** de IaC (sem checkout de outros repos). Contratos entre repositórios via SSM publicado por este repo e consumido por `database-infra` / `auto-shop-system`.
+
 | Workflow | Gatilho | O que faz |
 |---|---|---|
 | `ci.yml` | PR para `develop` e `main`; dispatch explícito em `main` pelo coordenador da aplicação | PR: validações estáticas; dispatch: recebe `session_id`, `started_at`, `session_mode`, stack, operação e `enable_nat_gateway`; salva o plano privado e um atestado do manifesto ligado ao run/attempt que o criou |
