@@ -8,6 +8,20 @@ global:
   customSecretLicenseKey: "NEW_RELIC_LICENSE_KEY"
   customAttributes:
     environment: "hml"
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 2000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 2000
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
 
 newrelic-infrastructure:
   enabled: true
