@@ -12,6 +12,7 @@ on:
         options:
           - hml
           - platform
+          - production
       plan_id:
         description: Plan ID printed by the CI plan workflow
         required: true
@@ -114,6 +115,7 @@ jobs:
           PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY || 'false' }}
           PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED || 'false' }}
           K8S_HML_TERRAFORM_ROOT_READY: ${{ vars.K8S_HML_TERRAFORM_ROOT_READY || 'false' }}
+          K8S_PRODUCTION_TERRAFORM_ROOT_READY: ${{ vars.K8S_PRODUCTION_TERRAFORM_ROOT_READY || 'false' }}
         run: |
           set -euo pipefail
           if [[ -n "$REQUESTED_LIFECYCLE_DISPATCH_ID" && ! "$REQUESTED_LIFECYCLE_DISPATCH_ID" =~ ^[0-9a-f]{32}$ ]]; then
@@ -133,7 +135,7 @@ jobs:
             exit 1
           fi
           case "$REQUESTED_STACK" in
-            hml|platform) ;;
+            hml|platform|production) ;;
             *) echo "::error::Unsupported Terraform stack."; exit 1 ;;
           esac
           case "$REQUESTED_OPERATION" in
@@ -142,6 +144,12 @@ jobs:
                 hml)
                   if [[ "$K8S_HML_TERRAFORM_ROOT_READY" != "true" || "$REQUESTED_SESSION_MODE" != "hml" ]]; then
                     echo "::error::The HML root is gated until its isolated state is reviewed and ready, and requires an HML session."
+                    exit 1
+                  fi
+                  ;;
+                production)
+                  if [[ "$K8S_PRODUCTION_TERRAFORM_ROOT_READY" != "true" || "$REQUESTED_SESSION_MODE" != "prd-window" ]]; then
+                    echo "::error::The production root is gated until its isolated state is reviewed and ready, and requires a PRD window."
                     exit 1
                   fi
                   ;;
@@ -227,6 +235,17 @@ jobs:
             exit 1
           fi
 
+      - name: Require the exact isolated production deploy role before AWS credentials
+        if: inputs.stack == 'production'
+        env:
+          PRODUCTION_DEPLOY_ROLE_ARN: ${{ vars.AWS_PRODUCTION_DEPLOY_ROLE_ARN || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$PRODUCTION_DEPLOY_ROLE_ARN" != "arn:aws:iam::035611741563:role/auto-shop/gh-deploy-k8s-production" ]]; then
+            echo "::error::AWS_PRODUCTION_DEPLOY_ROLE_ARN must be configured to the dedicated production-only role."
+            exit 1
+          fi
+
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         name: Assume the dedicated lifecycle authorization consumer role
         with:
@@ -260,8 +279,16 @@ jobs:
           role-duration-seconds: 3600
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        name: Assume the dedicated production deploy role
+        if: inputs.stack == 'production'
+        with:
+          role-to-assume: ${{ vars.AWS_PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 3600
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         name: Assume the shared staging deploy role
-        if: inputs.stack != 'hml'
+        if: inputs.stack == 'platform'
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -303,7 +330,7 @@ jobs:
           fi
 
       - name: Require the runner to be in the EKS administrator allowlist
-        if: inputs.stack == 'platform' || inputs.stack == 'hml'
+        if: inputs.stack == 'platform' || inputs.stack == 'hml' || inputs.stack == 'production'
         run: |
           set +e
           bash scripts/eks-endpoint-access.sh private-runner-allowed
