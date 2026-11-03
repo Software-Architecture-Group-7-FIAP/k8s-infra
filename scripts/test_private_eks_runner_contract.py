@@ -55,6 +55,7 @@ class PrivateEksRunnerContractTests(unittest.TestCase):
 
         self.assertIn("local.private_eks_runner_project_arn", trust)
         self.assertIn("local.private_database_runner_project_arn", trust)
+        self.assertIn("local.private_app_hml_runner_project_arn", trust)
         self.assertNotIn("project/*", trust)
 
     def test_runner_group_documentation_uses_exact_repository_and_workflow_allowlists(self) -> None:
