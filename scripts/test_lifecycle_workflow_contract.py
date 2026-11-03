@@ -434,6 +434,38 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
                     workflow.index(deploy_role),
                 )
 
+    def test_platform_apply_requires_the_hml_new_relic_secret_before_terraform_apply(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "cluster-apply.yml").read_text(
+            encoding="utf-8"
+        )
+        values = (ROOT / "envs" / "staging" / "platform" / "newrelic-hml-values.yaml").read_text(
+            encoding="utf-8"
+        )
+
+        gate_name = "Require the HML New Relic Kubernetes Secret before platform Helm apply"
+        gate_start = workflow.index(gate_name)
+        apply_start = workflow.index('terraform -chdir="$terraform_root" apply')
+        gate_end = workflow.index("\n      - name:", gate_start + len(gate_name))
+        gate = workflow[gate_start:gate_end]
+
+        self.assertIn("if: inputs.stack == 'platform'", gate)
+        self.assertIn("aws eks update-kubeconfig", gate)
+        self.assertIn("auto-shop-staging", gate)
+        self.assertIn("auto-shop-hml", gate)
+        self.assertIn("auto-shop-new-relic", gate)
+        self.assertIn("NEW_RELIC_LICENSE_KEY", gate)
+        self.assertIn(
+            '--template=\'{{if index .data "NEW_RELIC_LICENSE_KEY"}}present{{end}}\'',
+            gate,
+        )
+        self.assertIn('[[ "$secret_key_present" != "present" ]]', gate)
+        self.assertNotIn("jsonpath={.data.NEW_RELIC_LICENSE_KEY}", gate)
+        self.assertNotIn("encoded_license_key", gate)
+        self.assertIn("The New Relic Secret is missing or has no license key", gate)
+        self.assertLess(gate_start, apply_start)
+        self.assertIn('customSecretName: "auto-shop-new-relic"', values)
+        self.assertNotIn("${{ secrets.NEW_RELIC_LICENSE_KEY }}", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

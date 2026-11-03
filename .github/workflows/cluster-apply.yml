@@ -344,6 +344,48 @@ jobs:
             exit "$runner_access_status"
           fi
 
+      - name: Require the HML New Relic Kubernetes Secret before platform Helm apply
+        if: inputs.stack == 'platform'
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          cluster_name="$(aws ssm get-parameter \
+            --name /auto-shop/staging/eks/cluster-name \
+            --query 'Parameter.Value' \
+            --output text \
+            --no-cli-pager)"
+          if [[ "$cluster_name" != "auto-shop-staging" ]]; then
+            echo "::error::The HML New Relic preflight resolved an unexpected EKS cluster."
+            exit 1
+          fi
+
+          aws eks update-kubeconfig \
+            --name "$cluster_name" \
+            --region "$AWS_REGION" \
+            --no-cli-pager
+          expected_context="arn:aws:eks:us-east-1:035611741563:cluster/auto-shop-staging"
+          actual_context="$(kubectl config view --minify -o 'jsonpath={.contexts[0].context.cluster}')"
+          if [[ "$actual_context" != "$expected_context" ]]; then
+            echo "::error::kubectl context is not the approved HML EKS cluster."
+            exit 1
+          fi
+
+          namespace="$(kubectl get namespace auto-shop-hml --output=name)"
+          if [[ "$namespace" != "namespace/auto-shop-hml" ]]; then
+            echo "::error::The HML namespace is missing; create it before applying the platform stack."
+            exit 1
+          fi
+          secret_key_present="$(kubectl get secret auto-shop-new-relic \
+            --namespace auto-shop-hml \
+            --template='{{if index .data "NEW_RELIC_LICENSE_KEY"}}present{{end}}')"
+          if [[ "$secret_key_present" != "present" ]]; then
+            echo "::error::The New Relic Secret is missing or has no license key. Run the auto-shop-system HML secret preparation workflow before platform apply."
+            exit 1
+          fi
+          unset secret_key_present
+          echo "HML New Relic Secret is ready for the platform apply." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Prepare the checksum-pinned New Relic chart for platform apply
         if: inputs.stack == 'platform'
         run: bash scripts/prepare-newrelic-chart.sh
