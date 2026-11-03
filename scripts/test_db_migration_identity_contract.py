@@ -159,5 +159,12 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
             "depends_on = [kubernetes_service_account_v1.db_migration]", association
         )
 
+        self.assertIn(
+            "from = module.environment.kubernetes_service_account_v1.db_migration[0]",
+            HML_ROOT_TF,
+        )
+        self.assertIn("destroy = false", HML_ROOT_TF)
+
+
 if __name__ == "__main__":
     unittest.main()
