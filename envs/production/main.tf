@@ -48,3 +48,9 @@ module "environment" {
   cluster_name     = data.aws_eks_cluster.this.name
   create_namespace = true
 }
+
+# Preserve the production ServiceAccount state address when adding count.
+moved {
+  from = module.environment.kubernetes_service_account_v1.db_migration
+  to   = module.environment.kubernetes_service_account_v1.db_migration[0]
+}
