@@ -422,7 +422,7 @@ resource "kubernetes_manifest" "app_runtime_external_secret" {
 }
 
 # The environment-specific Pod Identity association stays in Terraform. HML's ServiceAccount is
-# owned by the application manifests; production's is owned by envs/production.
+# owned by the application manifests; production's ServiceAccount is also owned by the application manifests.
 resource "aws_eks_pod_identity_association" "db_migration" {
   cluster_name    = var.cluster_name
   namespace       = local.namespace_name
