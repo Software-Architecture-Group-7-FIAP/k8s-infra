@@ -160,7 +160,7 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "from = module.environment.kubernetes_service_account_v1.db_migration[0]",
+            "from = module.environment.kubernetes_service_account_v1.db_migration",
             HML_ROOT_TF,
         )
         self.assertIn("destroy = false", HML_ROOT_TF)
