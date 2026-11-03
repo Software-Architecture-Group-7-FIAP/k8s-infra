@@ -439,12 +439,7 @@ resource "aws_eks_pod_identity_association" "db_migration" {
 }
 
 
-# Preserve the existing production Terraform state address while disabling ServiceAccount
-# creation in HML, where auto-shop-system's deployment manifests own it.
-moved {
-  from = kubernetes_service_account_v1.db_migration
-  to   = kubernetes_service_account_v1.db_migration[0]
-}
+
 
 resource "kubernetes_service_account_v1" "db_migration" {
   count = var.environment == "prd" ? 1 : 0
