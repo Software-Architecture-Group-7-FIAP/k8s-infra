@@ -22,6 +22,69 @@ class PrivateEksRunnerContractTests(unittest.TestCase):
         self.assertIn('variable "enable_private_eks_runner"', variables)
         self.assertIn('variable "github_runner_group_id"', variables)
 
+    def test_database_runner_is_repo_scoped_and_uses_the_private_eks_network(self) -> None:
+        foundation = (ROOT / "envs" / "staging" / "foundation" / "main.tf").read_text(encoding="utf-8")
+        project = foundation.split('resource "aws_codebuild_project" "private_database_runner" {', 1)[1].split(
+            "\n}", 1
+        )[0]
+        webhook = foundation.split('resource "aws_codebuild_webhook" "private_database_runner" {', 1)[1].split(
+            "\n}", 1
+        )[0]
+        trust = foundation.split('data "aws_iam_policy_document" "private_eks_runner_assume_role" {', 1)[1].split(
+            'resource "aws_iam_role" "private_eks_runner" {', 1
+        )[0]
+
+        self.assertIn("name                   = local.private_database_runner_project_name", project)
+        self.assertRegex(
+            foundation,
+            r'(?m)^\s*private_database_runner_project_name\s*=\s*"auto-shop-db-private"\s*$',
+        )
+        self.assertIn(
+            'location        = "https://github.com/Software-Architecture-Group-7-FIAP/database-infra"',
+            project,
+        )
+        self.assertIn('type     = "CODECONNECTIONS"', project)
+        self.assertRegex(project, r"subnets\s*= module\.network\.workload_subnet_ids")
+        self.assertIn('security_group_ids = [aws_security_group.private_eks_runner.id]', project)
+        self.assertIn("aws_cloudwatch_log_group.private_eks_runner[0].name", project)
+        self.assertIn("build_timeout          = 100", project)
+
+        self.assertIn('pattern = "WORKFLOW_JOB_QUEUED"', webhook)
+        self.assertIn('pattern = "^Apply database staging$"', webhook)
+        self.assertNotIn("K8s HML Cluster", webhook)
+
+        self.assertIn("local.private_eks_runner_project_arn", trust)
+        self.assertIn("local.private_database_runner_project_arn", trust)
+        self.assertNotIn("project/*", trust)
+
+    def test_runner_group_documentation_uses_exact_repository_and_workflow_allowlists(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        allowlist = next(
+            line for line in readme.splitlines() if "Restrict repository access to exactly these repositories:" in line
+        )
+        repository_section = allowlist.split(
+            "Restrict repository access to exactly these repositories: ", 1
+        )[1].split(". Restrict workflow access", 1)[0]
+        allowed_repositories = re.findall(r"`([^`]+)`", repository_section)
+        self.assertEqual(allowed_repositories, ["auto-shop-system", "k8s-infra", "database-infra"])
+
+        workflow_section = allowlist.split(
+            "Restrict workflow access to only these five fully qualified entries: ", 1
+        )[1].split(". Do not allow any other repositories or workflows", 1)[0]
+        workflow_refs = (
+            "Software-Architecture-Group-7-FIAP/auto-shop-system/.github/workflows/deploy-hml-minimal.yml@refs/heads/develop",
+            "Software-Architecture-Group-7-FIAP/k8s-infra/.github/workflows/cluster-ci.yml@refs/heads/main",
+            "Software-Architecture-Group-7-FIAP/k8s-infra/.github/workflows/cluster-apply.yml@refs/heads/main",
+            "Software-Architecture-Group-7-FIAP/k8s-infra/.github/workflows/cluster-destroy.yml@refs/heads/main",
+            "Software-Architecture-Group-7-FIAP/database-infra/.github/workflows/apply.yml@refs/heads/main",
+        )
+        documented_workflow_refs = re.findall(r"`([^`]+)`", workflow_section)
+        self.assertEqual(documented_workflow_refs, list(workflow_refs))
+        self.assertIn(
+            'Disable the "Allow public repositories" option for this group.',
+            allowlist,
+        )
+
     def test_runner_security_group_has_no_ingress_and_only_https_egress(self) -> None:
         foundation = (ROOT / "envs" / "staging" / "foundation" / "main.tf").read_text(encoding="utf-8")
         security_group = foundation.split('resource "aws_security_group" "private_eks_runner" {', 1)[1].split(
