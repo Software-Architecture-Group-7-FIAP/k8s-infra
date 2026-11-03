@@ -57,18 +57,33 @@ class PrivateEksRunnerContractTests(unittest.TestCase):
         self.assertIn("local.private_database_runner_project_arn", trust)
         self.assertNotIn("project/*", trust)
 
-    def test_runner_group_documentation_uses_fully_qualified_workflow_refs(self) -> None:
+    def test_runner_group_documentation_uses_exact_repository_and_workflow_allowlists(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        allowlist = next(
+            line for line in readme.splitlines() if "Restrict repository access to exactly these repositories:" in line
+        )
+        repository_section = allowlist.split(
+            "Restrict repository access to exactly these repositories: ", 1
+        )[1].split(". Restrict workflow access", 1)[0]
+        allowed_repositories = re.findall(r"`([^`]+)`", repository_section)
+        self.assertEqual(allowed_repositories, ["auto-shop-system", "k8s-infra", "database-infra"])
+
+        workflow_section = allowlist.split(
+            "Restrict workflow access to only these five fully qualified entries: ", 1
+        )[1].split(". Do not allow any other repositories or workflows", 1)[0]
         workflow_refs = (
+            "Software-Architecture-Group-7-FIAP/auto-shop-system/.github/workflows/deploy-hml-minimal.yml@refs/heads/develop",
             "Software-Architecture-Group-7-FIAP/k8s-infra/.github/workflows/cluster-ci.yml@refs/heads/main",
             "Software-Architecture-Group-7-FIAP/k8s-infra/.github/workflows/cluster-apply.yml@refs/heads/main",
             "Software-Architecture-Group-7-FIAP/k8s-infra/.github/workflows/cluster-destroy.yml@refs/heads/main",
             "Software-Architecture-Group-7-FIAP/database-infra/.github/workflows/apply.yml@refs/heads/main",
         )
-
-        for workflow_ref in workflow_refs:
-            with self.subTest(workflow_ref=workflow_ref):
-                self.assertIn(f"`{workflow_ref}`", readme)
+        documented_workflow_refs = re.findall(r"`([^`]+)`", workflow_section)
+        self.assertEqual(documented_workflow_refs, list(workflow_refs))
+        self.assertIn(
+            'Disable the "Allow public repositories" option for this group.',
+            allowlist,
+        )
 
     def test_runner_security_group_has_no_ingress_and_only_https_egress(self) -> None:
         foundation = (ROOT / "envs" / "staging" / "foundation" / "main.tf").read_text(encoding="utf-8")
