@@ -136,14 +136,14 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
             migration_output,
         )
         self.assertIn(': "auto-shop-migration"', migration_output)
-        self.assertIn(
-            "from = kubernetes_service_account_v1.db_migration",
-            APPLICATION_ENVIRONMENT_TF,
-        )
-        self.assertIn(
-            "to   = kubernetes_service_account_v1.db_migration[0]",
-            APPLICATION_ENVIRONMENT_TF,
-        )
+        migration_move = """moved {
+  from = module.environment.kubernetes_service_account_v1.db_migration
+  to   = module.environment.kubernetes_service_account_v1.db_migration[0]
+}"""
+        self.assertIn(migration_move, PRODUCTION_ROOT_TF)
+        self.assertNotIn("moved {", HML_ROOT_TF)
+        self.assertNotIn("moved {", APPLICATION_ENVIRONMENT_TF)
+
 
         association_marker = (
             'resource "aws_eks_pod_identity_association" "db_migration" {'
