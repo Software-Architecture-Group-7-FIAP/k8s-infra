@@ -108,5 +108,20 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
         self.assertNotIn("pod_selector {}", migration_policy)
 
 
+    def test_application_deploy_owns_migration_service_account(self):
+        self.assertNotIn(
+            'resource "kubernetes_service_account_v1" "db_migration"',
+            APPLICATION_ENVIRONMENT_TF,
+        )
+        marker = 'resource "aws_eks_pod_identity_association" "db_migration" {'
+        self.assertIn(marker, APPLICATION_ENVIRONMENT_TF)
+        association = APPLICATION_ENVIRONMENT_TF.split(marker, maxsplit=1)[1].split(
+            "\nresource ", maxsplit=1
+        )[0]
+        self.assertIn("namespace       = local.namespace_name", association)
+        self.assertIn('service_account = "auto-shop-migration"', association)
+        self.assertIn("role_arn        = aws_iam_role.db_migration.arn", association)
+
+
 if __name__ == "__main__":
     unittest.main()
