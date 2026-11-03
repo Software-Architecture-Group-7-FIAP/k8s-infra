@@ -49,8 +49,6 @@ module "environment" {
   create_namespace = false
 }
 
-
-
 # Hand off the existing HML ServiceAccount to the application manifests without deleting it.
 removed {
   from = module.environment.kubernetes_service_account_v1.db_migration
