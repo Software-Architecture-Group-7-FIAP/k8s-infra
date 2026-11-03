@@ -240,6 +240,10 @@ jobs:
             exit "$runner_access_status"
           fi
 
+      - name: Prepare the checksum-pinned New Relic chart for platform destroy plan
+        if: inputs.stack == 'platform'
+        run: bash scripts/prepare-newrelic-chart.sh
+
       - name: Create and store one exact private destroy plan
         env:
           STACK: ${{ inputs.stack }}
@@ -559,6 +563,10 @@ jobs:
           if [[ "$runner_access_status" -ne 0 ]]; then
             exit "$runner_access_status"
           fi
+
+      - name: Prepare the checksum-pinned New Relic chart for platform destroy apply
+        if: inputs.stack == 'platform'
+        run: bash scripts/prepare-newrelic-chart.sh
 
       - name: Verify and destroy the exact saved plan
         env:
