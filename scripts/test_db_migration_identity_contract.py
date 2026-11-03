@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLATFORM_DIR = REPO_ROOT / "envs/staging/platform"
 PLATFORM_TERRAFORM = "\n".join(
@@ -25,6 +26,7 @@ MIGRATION_OUTPUTS_TF = (
 ).read_text(encoding="utf-8")
 README = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
+
 class DatabaseMigrationIdentityContractTests(unittest.TestCase):
     def test_k8s_platform_does_not_read_database_owner_or_migration_policy_arns(self):
         forbidden_parameter_paths = (
@@ -47,12 +49,13 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
         self.assertIn(
             'resource "aws_iam_role" "db_migration"', APPLICATION_ENVIRONMENT_TF
         )
+        environment_expression = "$" + "{var.environment}"
         self.assertIn(
-            'name                 = "auto-shop-staging-db-migrate-${var.environment}"',
+            'name                 = "auto-shop-staging-db-migrate-' + environment_expression + '"',
             APPLICATION_ENVIRONMENT_TF,
         )
         self.assertIn(
-            'name = "/auto-shop/staging/database/iam/migrations-${var.environment}-read-policy-arn"',
+            'name = "/auto-shop/staging/database/iam/migrations-' + environment_expression + '-read-policy-arn"',
             APPLICATION_ENVIRONMENT_TF,
         )
         self.assertIn(
@@ -69,17 +72,18 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
             "namespace = kubernetes_namespace_v1.this.metadata[0].name",
             NETWORK_POLICIES_TF,
         )
-        self.assertIn("`gh-deploy-database-infra`", README)
+        self.assertIn(chr(96) + "gh-deploy-database-infra" + chr(96), README)
         self.assertIn(
-            "Edit em `auto-shop-ops` (Job de bootstrap de banco)",
+            "Edit em " + chr(96) + "auto-shop-ops" + chr(96) + " (Job de bootstrap de banco)",
             README,
         )
 
     def test_hml_database_bootstrap_identity_is_environment_scoped_and_destroyable(self):
         self.assertIn('namespace = "auto-shop-ops"', HML_BOOTSTRAP_IDENTITY_TF)
         self.assertIn('name      = "auto-shop-db-bootstrap-hml"', HML_BOOTSTRAP_IDENTITY_TF)
+        account_expression = "$" + "{var.expected_account_id}"
         self.assertIn(
-            'role_arn        = "arn:aws:iam::${var.expected_account_id}:role/auto-shop/auto-shop-staging-db-bootstrap-hml"',
+            'role_arn        = "arn:aws:iam::' + account_expression + ':role/auto-shop/auto-shop-staging-db-bootstrap-hml"',
             HML_BOOTSTRAP_IDENTITY_TF,
         )
         self.assertIn('Purpose             = "db-bootstrap"', HML_BOOTSTRAP_IDENTITY_TF)
@@ -120,30 +124,31 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
         service_account_marker = (
             'resource "kubernetes_service_account_v1" "db_migration" {'
         )
-        self.assertIn(service_account_marker, APPLICATION_ENVIRONMENT_TF)
-        service_account = APPLICATION_ENVIRONMENT_TF.split(
+        self.assertNotIn(service_account_marker, APPLICATION_ENVIRONMENT_TF)
+        self.assertIn(service_account_marker, PRODUCTION_ROOT_TF)
+        production_resource = PRODUCTION_ROOT_TF.split(
             service_account_marker, maxsplit=1
-        )[1].split('resource "aws_eks_pod_identity_association"', maxsplit=1)[0]
-        self.assertIn('count = var.environment == "prd" ? 1 : 0', service_account)
-        self.assertIn('environment      = "hml"', HML_ROOT_TF)
-        self.assertIn('environment      = "prd"', PRODUCTION_ROOT_TF)
+        )[1].split("\n}", maxsplit=1)[0]
+        self.assertIn('name      = "auto-shop-migration"', production_resource)
+        self.assertIn("namespace = module.environment.namespace", production_resource)
+        self.assertIn('"auto-shop/environment"       = "prd"', production_resource)
+
+        self.assertIn(
+            "from = module.environment.kubernetes_service_account_v1.db_migration",
+            PRODUCTION_ROOT_TF,
+        )
+        self.assertIn("to   = kubernetes_service_account_v1.db_migration", PRODUCTION_ROOT_TF)
+        self.assertIn(
+            "from = module.environment.kubernetes_service_account_v1.db_migration",
+            HML_ROOT_TF,
+        )
+        self.assertIn("destroy = false", HML_ROOT_TF)
+
         migration_output = MIGRATION_OUTPUTS_TF.split(
             'output "migration_service_account" {', maxsplit=1
         )[1]
-        self.assertIn('var.environment == "prd"', migration_output)
-        self.assertIn(
-            "kubernetes_service_account_v1.db_migration[0].metadata[0].name",
-            migration_output,
-        )
-        self.assertIn(': "auto-shop-migration"', migration_output)
-        migration_move = """moved {
-  from = module.environment.kubernetes_service_account_v1.db_migration
-  to   = module.environment.kubernetes_service_account_v1.db_migration[0]
-}"""
-        self.assertIn(migration_move, PRODUCTION_ROOT_TF)
-        self.assertNotIn("moved {", HML_ROOT_TF)
-        self.assertNotIn("moved {", APPLICATION_ENVIRONMENT_TF)
-
+        self.assertIn('value       = "auto-shop-migration"', migration_output)
+        self.assertNotIn("kubernetes_service_account_v1.db_migration", migration_output)
 
         association_marker = (
             'resource "aws_eks_pod_identity_association" "db_migration" {'
@@ -151,19 +156,11 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
         self.assertIn(association_marker, APPLICATION_ENVIRONMENT_TF)
         association = APPLICATION_ENVIRONMENT_TF.split(
             association_marker, maxsplit=1
-        )[1].split("\nresource ", maxsplit=1)[0]
+        )[1].split("\n}", maxsplit=1)[0]
         self.assertIn("namespace       = local.namespace_name", association)
         self.assertIn('service_account = "auto-shop-migration"', association)
         self.assertIn("role_arn        = aws_iam_role.db_migration.arn", association)
-        self.assertIn(
-            "depends_on = [kubernetes_service_account_v1.db_migration]", association
-        )
-
-        self.assertIn(
-            "from = module.environment.kubernetes_service_account_v1.db_migration",
-            HML_ROOT_TF,
-        )
-        self.assertIn("destroy = false", HML_ROOT_TF)
+        self.assertNotIn("depends_on = [kubernetes_service_account_v1.db_migration]", association)
 
 
 if __name__ == "__main__":
