@@ -97,6 +97,18 @@ jobs:
       - name: Test staging session validator
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.17.3
+
+      - name: Render checksum-pinned New Relic chart
+        run: |
+          bash scripts/prepare-newrelic-chart.sh
+          helm template auto-shop-new-relic /tmp/auto-shop-newrelic-chart/nri-bundle-8.0.39.tgz \
+            --namespace auto-shop-hml \
+            --values envs/staging/platform/newrelic-hml-values.yaml \
+            --include-crds >/dev/null
+
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ env.TF_VERSION }}
