@@ -245,6 +245,10 @@ jobs:
             exit "$runner_access_status"
           fi
 
+      - name: Prepare the checksum-pinned New Relic chart for platform plan
+        if: inputs.stack == 'platform'
+        run: bash scripts/prepare-newrelic-chart.sh
+
       - name: Create and store one exact private Terraform plan
         env:
           STACK: ${{ inputs.stack }}
