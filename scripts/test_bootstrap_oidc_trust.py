@@ -64,6 +64,78 @@ class BootstrapOidcTrustTests(unittest.TestCase):
 
         self.assertIn("create_before_destroy = true", section)
 
+    def test_database_plan_role_reads_exact_objects_without_expanding_list_or_write_access(self):
+        def default_keys(variable_name, repository_name):
+            marker = f'variable "{variable_name}"'
+            variable = VARIABLES_TF.split(marker, maxsplit=1)[1].split(
+                '\nvariable "', maxsplit=1
+            )[0]
+            match = re.search(
+                rf'"{re.escape(repository_name)}"\s*=\s*\[(.*?)\]',
+                variable,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(match, f"Missing {repository_name} entry in {variable_name}.")
+            return re.findall(r'"([^"]+)"', match.group(1))
+
+        expected_database_state_objects = [
+            "database-infra/staging/terraform.tfstate",
+            "database-infra/hml/terraform.tfstate",
+            "database-infra/prd/terraform.tfstate",
+        ]
+        self.assertEqual(
+            default_keys("plan_state_object_keys", "database-infra"),
+            expected_database_state_objects,
+        )
+        self.assertEqual(
+            default_keys("plan_state_keys", "database-infra"),
+            ["database-infra/staging/terraform.tfstate"],
+        )
+        self.assertTrue(all("*" not in key for key in expected_database_state_objects))
+
+        plan_state_policy = MAIN_TF.split(
+            'data "aws_iam_policy_document" "plan_state"', maxsplit=1
+        )[1].split('resource "aws_iam_policy" "plan_state"', maxsplit=1)[0]
+        listing_allow = plan_state_policy.split(
+            'sid       = "ListOnlyExactStateKeys"', maxsplit=1
+        )[1].split('\n  statement {', maxsplit=1)[0]
+        self.assertIn("lookup(var.plan_state_keys, each.key, [])", listing_allow)
+        self.assertNotIn("plan_state_object_keys", listing_allow)
+        listing_deny = plan_state_policy.split(
+            'sid       = "DenyListingOutsideExactStateKeys"', maxsplit=1
+        )[1].split('\n  statement {', maxsplit=1)[0]
+        self.assertIn('test     = "StringNotEquals"', listing_deny)
+        self.assertIn("lookup(var.plan_state_keys, each.key, [])", listing_deny)
+
+        object_read_deny = plan_state_policy.split(
+            'sid     = "DenyObjectReadsOutsideExactStateKeys"', maxsplit=1
+        )[1].split('\n  statement {', maxsplit=1)[0]
+        self.assertIn('actions = ["s3:GetObject*"]', object_read_deny)
+        self.assertIn("var.plan_state_object_keys", object_read_deny)
+        self.assertIn("lookup(var.plan_state_keys, each.key, [])", object_read_deny)
+        self.assertIn("not_resources = [", object_read_deny)
+
+        write_deny = plan_state_policy.split(
+            'sid    = "DenyS3WritesOutsidePlanArtifacts"', maxsplit=1
+        )[1].split('\n  statement {', maxsplit=1)[0]
+        self.assertIn('effect = "Deny"', write_deny)
+        self.assertIn('"s3:PutObject*"', write_deny)
+        self.assertIn('"s3:DeleteObject*"', write_deny)
+        self.assertIn('"s3:CreateMultipartUpload"', write_deny)
+        self.assertIn('"s3:UploadPart"', write_deny)
+        self.assertIn('"s3:CompleteMultipartUpload"', write_deny)
+        self.assertIn('"s3:AbortMultipartUpload"', write_deny)
+        self.assertIn('sid       = "DenyPlanArtifactDeletion"', plan_state_policy)
+        bucket_admin_deny = plan_state_policy.split(
+            'sid    = "DenyStateBucketAdministration"', maxsplit=1
+        )[1].split('\n  }', maxsplit=1)[0]
+        self.assertIn('effect = "Deny"', bucket_admin_deny)
+
+        plan_artifacts = VARIABLES_TF.split(
+            'variable "plan_artifact_prefixes"', maxsplit=1
+        )[1].split('\nvariable "', maxsplit=1)[0]
+        self.assertRegex(plan_artifacts, r'"database-infra"\s*=\s*\[\]')
+
     def test_plan_restriction_description_does_not_force_policy_replacement(self):
         marker = 'resource "aws_iam_policy" "plan_restrictions"'
         start = MAIN_TF.index(marker)

@@ -49,7 +49,7 @@ variable "plan_environments" {
 }
 
 variable "plan_state_keys" {
-  description = "Exact S3 state object keys that each plan role may read. Update this map when a Terraform root is added."
+  description = "Exact S3 state object keys each plan role may list and, unless overridden, read."
   type        = map(list(string))
   default = {
     "k8s-infra" = [
@@ -61,6 +61,18 @@ variable "plan_state_keys" {
     "database-infra"   = ["database-infra/staging/terraform.tfstate"]
     "lambda-auth"      = ["lambda-auth/_no_remote_state_configured.tfstate"]
     "auto-shop-system" = ["auto-shop-system/infra/aws/staging/terraform.tfstate"]
+  }
+}
+
+variable "plan_state_object_keys" {
+  description = "Exact S3 state object keys each plan role may read when object-read scope differs from listing scope."
+  type        = map(list(string))
+  default = {
+    "database-infra" = [
+      "database-infra/staging/terraform.tfstate",
+      "database-infra/hml/terraform.tfstate",
+      "database-infra/prd/terraform.tfstate",
+    ]
   }
 }
 
