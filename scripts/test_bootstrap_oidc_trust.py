@@ -214,6 +214,39 @@ class BootstrapOidcTrustTests(unittest.TestCase):
         self.assertIn('variable = "iam:PassedToService"', pass_migration_role)
         self.assertIn('values   = ["pods.eks.amazonaws.com"]', pass_migration_role)
 
+    def test_k8s_infra_can_update_only_private_runner_trust_policy(self):
+        boundary = MAIN_TF.split(
+            'data "aws_iam_policy_document" "project_boundary"', maxsplit=1
+        )[1].split('resource "aws_iam_policy" "project_boundary"', maxsplit=1)[0]
+        boundary_grant = boundary.split(
+            'sid       = "AllowK8sInfraUpdatePrivateRunnerTrustPolicy"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+
+        self.assertIn('actions   = ["iam:UpdateAssumeRolePolicy"]', boundary_grant)
+        self.assertIn(
+            "role${var.iam_path}k8s-infra-codebuild-private-runner", boundary_grant
+        )
+        self.assertIn('variable = "aws:PrincipalArn"', boundary_grant)
+        self.assertIn("role${var.iam_path}gh-deploy-k8s-infra", boundary_grant)
+
+        deploy_iam = MAIN_TF.split(
+            'data "aws_iam_policy_document" "deploy_iam"', maxsplit=1
+        )[1].split('resource "aws_iam_policy" "deploy_iam"', maxsplit=1)[0]
+        managed_roles = deploy_iam.split(
+            'sid = "ManageOwnManagedRoles"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertNotIn("iam:UpdateAssumeRolePolicy", managed_roles)
+
+        identity_grant = deploy_iam.split(
+            'sid       = "AllowK8sInfraUpdatePrivateRunnerTrustPolicy"', maxsplit=1
+        )[1].split("\n  }", maxsplit=1)[0]
+        self.assertIn('actions   = ["iam:UpdateAssumeRolePolicy"]', identity_grant)
+        self.assertIn(
+            "role${var.iam_path}k8s-infra-codebuild-private-runner", identity_grant
+        )
+        self.assertIn('variable = "aws:PrincipalArn"', identity_grant)
+        self.assertIn("role${var.iam_path}gh-deploy-k8s-infra", identity_grant)
+
     def test_k8s_deploy_boundary_grants_are_limited_to_foundation_roles(self):
         boundary = MAIN_TF.split(
             'data "aws_iam_policy_document" "project_boundary"', maxsplit=1

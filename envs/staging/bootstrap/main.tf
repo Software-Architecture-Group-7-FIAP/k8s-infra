@@ -1106,6 +1106,18 @@ data "aws_iam_policy_document" "project_boundary" {
   }
 
   statement {
+    sid       = "AllowK8sInfraUpdatePrivateRunnerTrustPolicy"
+    actions   = ["iam:UpdateAssumeRolePolicy"]
+    resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}k8s-infra-codebuild-private-runner"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}gh-deploy-k8s-infra"]
+    }
+  }
+
+  statement {
     sid       = "AllowK8sInfraPassPrivateRunnerRole"
     actions   = ["iam:PassRole"]
     resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}k8s-infra-codebuild-private-runner"]
@@ -1247,12 +1259,24 @@ data "aws_iam_policy_document" "deploy_iam" {
   statement {
     sid = "ManageOwnManagedRoles"
     actions = [
-      "iam:UpdateRole", "iam:UpdateAssumeRolePolicy", "iam:TagRole", "iam:UntagRole",
+      "iam:UpdateRole", "iam:TagRole", "iam:UntagRole",
       "iam:DeleteRole", "iam:GetRole", "iam:ListRoleTags", "iam:GetRolePolicy", "iam:ListRolePolicies",
       "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole", "iam:DetachRolePolicy",
       "iam:DeleteRolePolicy", "iam:PutRolePolicy",
     ]
     resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}*"]
+  }
+
+  statement {
+    sid       = "AllowK8sInfraUpdatePrivateRunnerTrustPolicy"
+    actions   = ["iam:UpdateAssumeRolePolicy"]
+    resources = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}k8s-infra-codebuild-private-runner"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:${local.partition}:iam::${local.account_id}:role${var.iam_path}gh-deploy-k8s-infra"]
+    }
   }
 
   statement {

@@ -367,6 +367,7 @@ locals {
   private_eks_runner_project_arn       = "arn:${local.partition}:codebuild:${var.aws_region}:${local.account_id}:project/${local.private_eks_runner_project_name}"
   private_database_runner_project_name = "auto-shop-db-private"
   private_database_runner_project_arn  = "arn:${local.partition}:codebuild:${var.aws_region}:${local.account_id}:project/${local.private_database_runner_project_name}"
+  private_app_hml_runner_project_arn   = "arn:${local.partition}:codebuild:${var.aws_region}:${local.account_id}:project/auto-shop-hml-private-runner"
 }
 
 data "aws_iam_policy_document" "private_eks_runner_assume_role" {
@@ -391,6 +392,7 @@ data "aws_iam_policy_document" "private_eks_runner_assume_role" {
       values = [
         local.private_eks_runner_project_arn,
         local.private_database_runner_project_arn,
+        local.private_app_hml_runner_project_arn,
       ]
     }
   }
