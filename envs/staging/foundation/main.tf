@@ -363,8 +363,10 @@ resource "aws_security_group" "private_eks_runner" {
 }
 
 locals {
-  private_eks_runner_project_name = "auto-shop-k8s-private"
-  private_eks_runner_project_arn  = "arn:${local.partition}:codebuild:${var.aws_region}:${local.account_id}:project/${local.private_eks_runner_project_name}"
+  private_eks_runner_project_name      = "auto-shop-k8s-private"
+  private_eks_runner_project_arn       = "arn:${local.partition}:codebuild:${var.aws_region}:${local.account_id}:project/${local.private_eks_runner_project_name}"
+  private_database_runner_project_name = "auto-shop-db-private"
+  private_database_runner_project_arn  = "arn:${local.partition}:codebuild:${var.aws_region}:${local.account_id}:project/${local.private_database_runner_project_name}"
 }
 
 data "aws_iam_policy_document" "private_eks_runner_assume_role" {
@@ -386,7 +388,10 @@ data "aws_iam_policy_document" "private_eks_runner_assume_role" {
     condition {
       test     = "ArnEquals"
       variable = "aws:SourceArn"
-      values   = [local.private_eks_runner_project_arn]
+      values = [
+        local.private_eks_runner_project_arn,
+        local.private_database_runner_project_arn,
+      ]
     }
   }
 }
@@ -396,7 +401,7 @@ resource "aws_iam_role" "private_eks_runner" {
 
   name                 = "k8s-infra-codebuild-private-runner"
   path                 = "/auto-shop/"
-  description          = "Minimal VPC and log permissions for ephemeral k8s-infra GitHub Actions jobs."
+  description          = "Minimal VPC and log permissions for ephemeral protected HML and cluster GitHub Actions jobs."
   assume_role_policy   = data.aws_iam_policy_document.private_eks_runner_assume_role.json
   permissions_boundary = local.project_boundary_arn
 
@@ -541,6 +546,86 @@ resource "aws_codebuild_project" "private_eks_runner" {
   }
 
   tags = local.tags
+}
+
+resource "aws_codebuild_project" "private_database_runner" {
+  count = var.enable_private_eks_runner ? 1 : 0
+
+  name                   = local.private_database_runner_project_name
+  description            = "Private, ephemeral GitHub Actions runner for the protected database-infra HML apply workflow."
+  service_role           = aws_iam_role.private_eks_runner[0].arn
+  build_timeout          = 100
+  queued_timeout         = 30
+  concurrent_build_limit = 1
+
+  artifacts {
+    type = "NO_ARTIFACTS"
+  }
+
+  environment {
+    compute_type                = "BUILD_GENERAL1_MEDIUM"
+    image                       = "aws/codebuild/amazonlinux-x86_64-standard:5.0"
+    type                        = "LINUX_CONTAINER"
+    image_pull_credentials_type = "CODEBUILD"
+    privileged_mode             = false
+
+    environment_variable {
+      name  = "CODEBUILD_CONFIG_GITHUB_ACTIONS_ORG_REGISTRATION_NAME"
+      value = "Software-Architecture-Group-7-FIAP"
+    }
+
+    environment_variable {
+      name  = "CODEBUILD_CONFIG_GITHUB_ACTIONS_RUNNER_GROUP_ID"
+      value = tostring(var.github_runner_group_id)
+    }
+  }
+
+  source {
+    type            = "GITHUB"
+    location        = "https://github.com/Software-Architecture-Group-7-FIAP/database-infra"
+    git_clone_depth = 1
+
+    auth {
+      type     = "CODECONNECTIONS"
+      resource = var.github_codeconnection_arn
+    }
+  }
+
+  vpc_config {
+    vpc_id             = module.network.vpc_id
+    subnets            = module.network.workload_subnet_ids
+    security_group_ids = [aws_security_group.private_eks_runner.id]
+  }
+
+  logs_config {
+    cloudwatch_logs {
+      status     = "ENABLED"
+      group_name = aws_cloudwatch_log_group.private_eks_runner[0].name
+    }
+  }
+
+  tags = local.tags
+}
+
+resource "aws_codebuild_webhook" "private_database_runner" {
+  count = var.enable_private_eks_runner ? 1 : 0
+
+  project_name = aws_codebuild_project.private_database_runner[0].name
+  build_type   = "BUILD"
+
+  filter_group {
+    filter {
+      type    = "EVENT"
+      pattern = "WORKFLOW_JOB_QUEUED"
+    }
+
+    filter {
+      type    = "WORKFLOW_NAME"
+      pattern = "^Apply database staging$"
+    }
+  }
+
+  depends_on = [aws_codebuild_source_credential.private_eks_runner]
 }
 
 resource "aws_codebuild_webhook" "private_eks_runner" {
