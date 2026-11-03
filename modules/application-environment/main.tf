@@ -421,23 +421,13 @@ resource "kubernetes_manifest" "app_runtime_external_secret" {
   depends_on = [kubernetes_manifest.app_runtime_store]
 }
 
-resource "kubernetes_service_account_v1" "db_migration" {
-  metadata {
-    name      = "auto-shop-migration"
-    namespace = local.namespace_name
-    labels = {
-      "app.kubernetes.io/name"      = "auto-shop-system"
-      "app.kubernetes.io/component" = "migration"
-      "auto-shop/environment"       = var.environment
-    }
-  }
-
-}
-
+# auto-shop-system's deployment manifests own this ServiceAccount. Terraform manages only
+# the environment-scoped Pod Identity association so deployment and infrastructure state do not
+# race to create the same Kubernetes object.
 resource "aws_eks_pod_identity_association" "db_migration" {
   cluster_name    = var.cluster_name
-  namespace       = kubernetes_service_account_v1.db_migration.metadata[0].namespace
-  service_account = kubernetes_service_account_v1.db_migration.metadata[0].name
+  namespace       = local.namespace_name
+  service_account = "auto-shop-migration"
   role_arn        = aws_iam_role.db_migration.arn
   tags = {
     Environment         = var.environment
