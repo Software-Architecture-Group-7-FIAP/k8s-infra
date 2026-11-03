@@ -16,7 +16,7 @@ resource "helm_release" "new_relic_hml" {
 
   lifecycle {
     precondition {
-      condition = fileexists(local.newrelic_nri_bundle_chart_path) ? filesha256(local.newrelic_nri_bundle_chart_path) == local.newrelic_nri_bundle_chart_sha256 : false
+      condition     = fileexists(local.newrelic_nri_bundle_chart_path) ? filesha256(local.newrelic_nri_bundle_chart_path) == local.newrelic_nri_bundle_chart_sha256 : false
       error_message = "Prepare and verify nri-bundle 8.0.39 with scripts/prepare-newrelic-chart.sh before planning or applying the HML platform stack."
     }
   }
