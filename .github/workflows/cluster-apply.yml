@@ -349,14 +349,14 @@ jobs:
             echo "::error::The HML namespace is missing; create it before applying the platform stack."
             exit 1
           fi
-          encoded_license_key="$(kubectl get secret auto-shop-new-relic \
+          secret_key_present="$(kubectl get secret auto-shop-new-relic \
             --namespace auto-shop-hml \
-            --output='jsonpath={.data.NEW_RELIC_LICENSE_KEY}')"
-          if [[ -z "$encoded_license_key" ]]; then
+            --template='{{if index .data "NEW_RELIC_LICENSE_KEY"}}present{{end}}')"
+          if [[ "$secret_key_present" != "present" ]]; then
             echo "::error::The New Relic Secret is missing or has no license key. Run the auto-shop-system HML secret preparation workflow before platform apply."
             exit 1
           fi
-          unset encoded_license_key
+          unset secret_key_present
           echo "HML New Relic Secret is ready for the platform apply." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Prepare the checksum-pinned New Relic chart for platform apply

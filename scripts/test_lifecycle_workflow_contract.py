@@ -454,6 +454,13 @@ class LifecycleWorkflowContractTests(unittest.TestCase):
         self.assertIn("auto-shop-hml", gate)
         self.assertIn("auto-shop-new-relic", gate)
         self.assertIn("NEW_RELIC_LICENSE_KEY", gate)
+        self.assertIn(
+            '--template=\'{{if index .data "NEW_RELIC_LICENSE_KEY"}}present{{end}}\'',
+            gate,
+        )
+        self.assertIn('[[ "$secret_key_present" != "present" ]]', gate)
+        self.assertNotIn("jsonpath={.data.NEW_RELIC_LICENSE_KEY}", gate)
+        self.assertNotIn("encoded_license_key", gate)
         self.assertIn("The New Relic Secret is missing or has no license key", gate)
         self.assertLess(gate_start, apply_start)
         self.assertIn('customSecretName: "auto-shop-new-relic"', values)
