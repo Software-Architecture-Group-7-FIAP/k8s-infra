@@ -49,21 +49,11 @@ module "environment" {
   create_namespace = true
 }
 
-# Production retains Terraform ownership of its migration ServiceAccount.
-resource "kubernetes_service_account_v1" "db_migration" {
-  metadata {
-    name      = "auto-shop-migration"
-    namespace = module.environment.namespace
-    labels = {
-      "app.kubernetes.io/name"      = "auto-shop-system"
-      "app.kubernetes.io/component" = "migration"
-      "auto-shop/environment"       = "prd"
-    }
-  }
-}
-
-# Keep the existing production ServiceAccount while moving its state out of the shared module.
-moved {
+# Hand off the existing production ServiceAccount to the application manifests without deleting it.
+removed {
   from = module.environment.kubernetes_service_account_v1.db_migration
-  to   = kubernetes_service_account_v1.db_migration
+
+  lifecycle {
+    destroy = false
+  }
 }
