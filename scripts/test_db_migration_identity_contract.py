@@ -120,7 +120,7 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
         self.assertNotIn('port     = "2703"', migration_policy)
         self.assertNotIn("pod_selector {}", migration_policy)
 
-def test_migration_service_account_is_handed_to_application_manifests(self):
+    def test_migration_service_account_is_handed_to_application_manifests(self):
         service_account_marker = (
             'resource "kubernetes_service_account_v1" "db_migration" {'
         )
