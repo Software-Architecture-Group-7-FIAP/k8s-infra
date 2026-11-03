@@ -120,29 +120,31 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
         self.assertNotIn('port     = "2703"', migration_policy)
         self.assertNotIn("pod_selector {}", migration_policy)
 
-    def test_migration_service_account_ownership_is_environment_scoped(self):
+def test_migration_service_account_is_handed_to_application_manifests(self):
         service_account_marker = (
             'resource "kubernetes_service_account_v1" "db_migration" {'
         )
         self.assertNotIn(service_account_marker, APPLICATION_ENVIRONMENT_TF)
-        self.assertIn(service_account_marker, PRODUCTION_ROOT_TF)
-        production_resource = PRODUCTION_ROOT_TF.split(
-            service_account_marker, maxsplit=1
-        )[1].split("\n}", maxsplit=1)[0]
-        self.assertIn('name      = "auto-shop-migration"', production_resource)
-        self.assertIn("namespace = module.environment.namespace", production_resource)
-        self.assertIn('"auto-shop/environment"       = "prd"', production_resource)
 
-        self.assertIn(
-            "from = module.environment.kubernetes_service_account_v1.db_migration",
-            PRODUCTION_ROOT_TF,
-        )
-        self.assertIn("to   = kubernetes_service_account_v1.db_migration", PRODUCTION_ROOT_TF)
-        self.assertIn(
-            "from = module.environment.kubernetes_service_account_v1.db_migration",
-            HML_ROOT_TF,
-        )
-        self.assertIn("destroy = false", HML_ROOT_TF)
+        for environment, environment_root in (
+            ("hml", HML_ROOT_TF),
+            ("production", PRODUCTION_ROOT_TF),
+        ):
+            with self.subTest(environment=environment):
+                self.assertNotIn(service_account_marker, environment_root)
+                self.assertEqual(1, environment_root.count("removed {"))
+                handoff_block = environment_root.split("removed {", maxsplit=1)[1].split(
+                    "\n}", maxsplit=1
+                )[0]
+                self.assertIn(
+                    "from = module.environment.kubernetes_service_account_v1.db_migration",
+                    handoff_block,
+                )
+                self.assertIn("destroy = false", handoff_block)
+                self.assertNotIn(
+                    "to   = kubernetes_service_account_v1.db_migration",
+                    environment_root,
+                )
 
         migration_output = MIGRATION_OUTPUTS_TF.split(
             'output "migration_service_account" {', maxsplit=1
