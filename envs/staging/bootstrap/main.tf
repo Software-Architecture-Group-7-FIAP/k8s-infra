@@ -383,7 +383,11 @@ data "aws_iam_policy_document" "plan_state" {
     effect  = "Deny"
     actions = ["s3:GetObject*"]
     not_resources = [
-      for key in lookup(var.plan_state_keys, each.key, []) :
+      for key in lookup(
+        var.plan_state_object_keys,
+        each.key,
+        lookup(var.plan_state_keys, each.key, [])
+      ) :
       "arn:${local.partition}:s3:::${var.state_bucket}/${key}"
     ]
   }
