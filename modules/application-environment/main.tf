@@ -435,22 +435,10 @@ resource "aws_eks_pod_identity_association" "db_migration" {
     Purpose             = "db-migration"
   }
 
-  depends_on = [kubernetes_service_account_v1.db_migration]
+  
 }
 
 
 
 
-resource "kubernetes_service_account_v1" "db_migration" {
-  count = var.environment == "prd" ? 1 : 0
 
-  metadata {
-    name      = "auto-shop-migration"
-    namespace = local.namespace_name
-    labels = {
-      "app.kubernetes.io/name"      = "auto-shop-system"
-      "app.kubernetes.io/component" = "migration"
-      "auto-shop/environment"       = var.environment
-    }
-  }
-}
