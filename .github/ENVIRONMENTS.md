@@ -1,15 +1,21 @@
-# GitHub Environments and HML handoff
+# GitHub Environments and cluster lifecycle handoff
 
 `branch-pipeline.yml` runs static checks for pull requests and pushes to `develop`. It does not use
 OIDC, request AWS credentials, or apply Terraform. There is no production branch trigger. The
 application coordinator uses the hosted `ci.yml`/`apply.yml` workflows for foundation and the
-session-gated `cluster-ci.yml`/`cluster-apply.yml` workflows for platform and HML.
+session-gated `cluster-ci.yml`/`cluster-apply.yml` workflows for platform, HML, and the gated production root.
 
 The HML Apply/Destroy jobs run from `main` in the protected `staging` Environment after validating
 the session ledger, trusted actor, one-use lifecycle dispatch, plan attestation, and confirmation.
 HML credentials use `AWS_HML_DEPLOY_ROLE_ARN`, which must equal
 `arn:aws:iam::035611741563:role/auto-shop/gh-deploy-k8s-hml`. The generic
-`AWS_DEPLOY_ROLE_ARN` is used only for shared staging roots. PRD apply is disabled.
+`AWS_DEPLOY_ROLE_ARN` is used only for shared staging roots. Production apply requires
+`AWS_PRODUCTION_DEPLOY_ROLE_ARN` to equal
+`arn:aws:iam::035611741563:role/auto-shop/gh-deploy-k8s-production`; it must be a separately provisioned,
+production-only role with access to the production state and saved apply plan. The bootstrap in this
+repository does not provision that role yet, so production apply fails closed until the role and variable
+are configured. Both production planning and apply also require `K8S_PRODUCTION_TERRAFORM_ROOT_READY=true`
+and an authorized `prd-window` session.
 
 The existing `staging` Environment remains reserved for the lifecycle/session workflows in
 `main`. Its branch policy must remain main-only so those gates are not bypassed or made unavailable.
