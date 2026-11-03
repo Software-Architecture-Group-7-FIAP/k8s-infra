@@ -48,3 +48,12 @@ module "environment" {
   cluster_name     = data.aws_eks_cluster.this.name
   create_namespace = true
 }
+
+# Hand off the existing production ServiceAccount to the application manifests without deleting it.
+removed {
+  from = module.environment.kubernetes_service_account_v1.db_migration
+
+  lifecycle {
+    destroy = false
+  }
+}

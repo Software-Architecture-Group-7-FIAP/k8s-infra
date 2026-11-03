@@ -5,5 +5,5 @@ output "namespace" {
 
 output "migration_service_account" {
   description = "Migration service account in this environment's namespace."
-  value       = kubernetes_service_account_v1.db_migration.metadata[0].name
+  value       = "auto-shop-migration"
 }
