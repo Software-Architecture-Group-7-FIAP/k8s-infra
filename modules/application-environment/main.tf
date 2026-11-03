@@ -434,6 +434,8 @@ resource "aws_eks_pod_identity_association" "db_migration" {
     KubernetesNamespace = local.namespace
     Purpose             = "db-migration"
   }
+
+  depends_on = [kubernetes_service_account_v1.db_migration]
 }
 
 
