@@ -20,6 +20,9 @@ HML_ROOT_TF = (REPO_ROOT / "envs/hml/main.tf").read_text(encoding="utf-8")
 PRODUCTION_ROOT_TF = (REPO_ROOT / "envs/production/main.tf").read_text(
     encoding="utf-8"
 )
+MIGRATION_OUTPUTS_TF = (
+    REPO_ROOT / "modules/application-environment/outputs.tf"
+).read_text(encoding="utf-8")
 README = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
 class DatabaseMigrationIdentityContractTests(unittest.TestCase):
@@ -124,6 +127,15 @@ class DatabaseMigrationIdentityContractTests(unittest.TestCase):
         self.assertIn('count = var.environment == "prd" ? 1 : 0', service_account)
         self.assertIn('environment      = "hml"', HML_ROOT_TF)
         self.assertIn('environment      = "prd"', PRODUCTION_ROOT_TF)
+        migration_output = MIGRATION_OUTPUTS_TF.split(
+            'output "migration_service_account" {', maxsplit=1
+        )[1]
+        self.assertIn('var.environment == "prd"', migration_output)
+        self.assertIn(
+            "kubernetes_service_account_v1.db_migration[0].metadata[0].name",
+            migration_output,
+        )
+        self.assertIn(': "auto-shop-migration"', migration_output)
         self.assertIn(
             "from = kubernetes_service_account_v1.db_migration",
             APPLICATION_ENVIRONMENT_TF,
