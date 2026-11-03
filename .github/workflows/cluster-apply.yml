@@ -317,6 +317,10 @@ jobs:
             exit "$runner_access_status"
           fi
 
+      - name: Prepare the checksum-pinned New Relic chart for platform apply
+        if: inputs.stack == 'platform'
+        run: bash scripts/prepare-newrelic-chart.sh
+
       - name: Verify and apply the exact saved plan
         env:
           STACK: ${{ inputs.stack }}
