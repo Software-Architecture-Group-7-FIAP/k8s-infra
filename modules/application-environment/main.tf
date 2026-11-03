@@ -421,9 +421,8 @@ resource "kubernetes_manifest" "app_runtime_external_secret" {
   depends_on = [kubernetes_manifest.app_runtime_store]
 }
 
-# In HML, auto-shop-system's deployment manifests own this ServiceAccount; production retains Terraform ownership.
-# Terraform manages the environment-scoped Pod Identity association in both roots;
-# while keeping one ServiceAccount owner per environment.
+# The environment-specific Pod Identity association stays in Terraform. HML's ServiceAccount is
+# owned by the application manifests; production's is owned by envs/production.
 resource "aws_eks_pod_identity_association" "db_migration" {
   cluster_name    = var.cluster_name
   namespace       = local.namespace_name
@@ -434,11 +433,4 @@ resource "aws_eks_pod_identity_association" "db_migration" {
     KubernetesNamespace = local.namespace
     Purpose             = "db-migration"
   }
-
-  
 }
-
-
-
-
-
